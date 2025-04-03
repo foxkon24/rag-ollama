@@ -26,6 +26,11 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
         # OneDrive検索を実行するかどうかを判断
         use_onedrive = onedrive_search is not None and 'onedrive' not in clean_query.lower()
 
+        # 検索ディレクトリパスを取得（検索するかどうか関係なく）
+        search_path = None
+        if onedrive_search is not None:
+            search_path = onedrive_search.base_directory
+        
         # OneDrive検索のログ
         if use_onedrive:
             logger.info(f"OneDrive検索を実行します: '{clean_query}'")
@@ -49,7 +54,7 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
         if teams_webhook:
             # TEAMS_WORKFLOW_URLを使用して直接Teamsに送信
             logger.info("Teamsに直接応答を送信します")
-            result = teams_webhook.send_ollama_response(clean_query, response)
+            result = teams_webhook.send_ollama_response(clean_query, response, None, search_path)
             logger.info(f"Teams送信結果: {result}")
 
             # 送信に失敗した場合の処理

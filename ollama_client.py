@@ -3,6 +3,7 @@ import logging
 import requests
 import traceback
 import re
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,12 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 
         # OneDrive検索が有効かつクエリがある場合は関連情報を検索
         onedrive_context = ""
+        search_path = ""
         if onedrive_search and clean_query:
+            # 検索ディレクトリのパスを取得（短縮表示用）
+            search_path = onedrive_search.base_directory
+            short_path = get_shortened_path(search_path)
+            
             # 日付を含むかどうかを確認（日報検索に重要）
             has_date = bool(re.search(r'\d{4}年\d{1,2}月\d{1,2}日', clean_query))
             
@@ -38,7 +44,7 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
             try:
                 relevant_content = onedrive_search.get_relevant_content(clean_query)
                 if relevant_content and "件の関連ファイルが見つかりました" in relevant_content:
-                    onedrive_context = f"\n\n参考資料（OneDriveから取得）:\n{relevant_content}"
+                    onedrive_context = f"\n\n参考資料（OneDriveから取得 - {short_path}）:\n{relevant_content}"
                     logger.info(f"OneDriveから関連情報を取得: {len(onedrive_context)}文字")
                 else:
                     # ファイルが見つからない場合は見つからないことを明示
@@ -50,14 +56,14 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                             month = date_match.group(2)
                             day = date_match.group(3)
                             date_str = f"{year}年{month}月{day}日"
-                            onedrive_context = f"\n\n注意: {date_str}の日報は見つかりませんでした。"
+                            onedrive_context = f"\n\n注意: {date_str}の日報は検索ディレクトリ（{short_path}）から見つかりませんでした。"
                     else:
-                        onedrive_context = "\n\n注意: 関連する日報ファイルは見つかりませんでした。"
+                        onedrive_context = f"\n\n注意: 関連する日報ファイルは検索ディレクトリ（{short_path}）から見つかりませんでした。"
                     
                     logger.info("関連情報は見つかりませんでした")
             except Exception as e:
                 logger.error(f"OneDrive検索中にエラーが発生: {str(e)}")
-                onedrive_context = "\n\n注意: OneDriveでの検索中にエラーが発生しました。"
+                onedrive_context = f"\n\n注意: OneDriveでの検索中にエラーが発生しました。検索パス: {short_path}"
 
         # Ollamaとは何かを質問されているかを確認
         is_about_ollama = "ollama" in clean_query.lower() and ("とは" in clean_query or "什么" in clean_query or "what" in clean_query.lower())
@@ -77,7 +83,7 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 - APIを通じて他のアプリケーションから利用できる{onedrive_context}"""
         else:
             # 日報に関する質問の特別処理
-            if "日報" in clean_query and onedrive_context:
+            if "日報" in clean_query and onedrive_context and "件の関連ファイルが見つかりました" in onedrive_context:
                 prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
@@ -86,18 +92,19 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 
 上記の参考資料を基に具体的に回答してください。特に日付や内容を明確に述べてください。
 参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください。"""
-            elif "日報" in clean_query:
+            elif "日報" in clean_query and not ("件の関連ファイルが見つかりました" in onedrive_context):
                 # 日報が見つからない場合
                 date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
                 if date_match:
                     year = date_match.group(1)
                     month = date_match.group(2)
                     day = date_match.group(3)
+                    short_path = get_shortened_path(search_path)
                     prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
-{year}年{month}月{day}日の日報データは見つかりませんでした。
+{year}年{month}月{day}日の日報データは検索ディレクトリ（{short_path}）から見つかりませんでした。
 以下のいずれかの理由が考えられます：
 1. 指定された日付の日報が存在しない
 2. 検索可能な場所に保存されていない
@@ -106,11 +113,12 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 
 この日付の日報内容については情報がないため、お答えできません。別の日付をお試しいただくか、システム管理者にお問い合わせください。"""
                 else:
+                    short_path = get_shortened_path(search_path)
                     prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
-ご質問の日報データは見つかりませんでした。具体的な日付（例：2024年10月26日）を指定すると検索できる可能性があります。
+ご質問の日報データは検索ディレクトリ（{short_path}）から見つかりませんでした。具体的な日付（例：2024年10月26日）を指定すると検索できる可能性があります。
 日報検索には、年月日を含めた形で質問していただくとより正確に検索できます。"""
             else:
                 # OneDriveコンテキストを含むプロンプト
@@ -164,16 +172,16 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 
             else:
                 # エラーが発生した場合のフォールバック応答
-                return get_fallback_response(clean_query, is_about_ollama)
+                return get_fallback_response(clean_query, is_about_ollama, search_path)
 
         except requests.exceptions.Timeout:
             logger.error("Ollamaリクエストがタイムアウトしました")
             # タイムアウト時のフォールバック応答
-            return get_fallback_response(clean_query, is_about_ollama)
+            return get_fallback_response(clean_query, is_about_ollama, search_path)
 
         except requests.exceptions.ConnectionError:
             logger.error("Ollamaサーバーに接続できませんでした")
-            return get_fallback_response(clean_query, is_about_ollama)
+            return get_fallback_response(clean_query, is_about_ollama, search_path)
 
     except Exception as e:
         logger.error(f"回答生成中にエラーが発生しました: {str(e)}")
@@ -181,17 +189,63 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
         logger.error(traceback.format_exc())
         return f"エラーが発生しました: {str(e)}"
 
-def get_fallback_response(query, is_about_ollama=False):
+def get_shortened_path(path):
+    """
+    長いパスを短縮して表示
+
+    Args:
+        path: 元のパス文字列
+
+    Returns:
+        短縮されたパス
+    """
+    if not path:
+        return "デフォルト検索ディレクトリ"
+        
+    # ユーザー名を取得
+    username = os.getenv("USERNAME", "owner")
+    
+    # パスが長い場合は短縮表示
+    if len(path) > 50:
+        # OneDriveパスの特定のパターンを検出
+        if "OneDrive" in path:
+            # 会社名を含むOneDriveパスのパターン
+            company_match = re.search(r'OneDrive - ([^\\]+)', path)
+            if company_match:
+                company = company_match.group(1)
+                # 短縮した会社名
+                short_company = company[:10] + "..." if len(company) > 10 else company
+                # パスの後半部分を取得
+                path_parts = path.split("\\")
+                if len(path_parts) > 3:
+                    last_parts = path_parts[-3:]
+                    return f"OneDrive - {short_company}\\...\\{last_parts[-3]}\\{last_parts[-2]}\\{last_parts[-1]}"
+                
+        # 一般的な短縮
+        path_parts = path.split("\\")
+        if len(path_parts) > 3:
+            first_part = path_parts[0]
+            if ":" in first_part:  # ドライブレター
+                first_part = path_parts[0] + "\\" + path_parts[1]
+            last_parts = path_parts[-2:]
+            return f"{first_part}\\...\\{last_parts[0]}\\{last_parts[1]}"
+    
+    return path
+
+def get_fallback_response(query, is_about_ollama=False, search_path=""):
     """
     タイムアウトやエラー時に使用するフォールバック応答を返す
 
     Args:
         query: ユーザーの質問
         is_about_ollama: Ollamaに関する質問かどうか
+        search_path: 検索したパス
 
     Returns:
         フォールバック応答
     """
+    short_path = get_shortened_path(search_path)
+    
     if is_about_ollama:
         return """Ollamaは、大規模言語モデル（LLM）をローカル環境で実行するためのオープンソースフレームワークです。
 
@@ -211,8 +265,8 @@ Ollamaを使うと、プライバシーを保ちながら、AI機能を様々な
             year = date_match.group(1)
             month = date_match.group(2)
             day = date_match.group(3)
-            return f"{year}年{month}月{day}日の日報データを取得できませんでした。サーバーの応答に問題があるか、該当する日報が存在しない可能性があります。時間をおいて再度お試しいただくか、システム管理者にお問い合わせください。"
+            return f"{year}年{month}月{day}日の日報データを取得できませんでした。サーバーの応答に問題があるか、該当する日報が検索ディレクトリ（{short_path}）に存在しない可能性があります。時間をおいて再度お試しいただくか、システム管理者にお問い合わせください。"
         else:
-            return "日報データを取得できませんでした。具体的な日付（例：2024年10月26日）を指定して再度お試しください。"
+            return f"日報データを取得できませんでした。具体的な日付（例：2024年10月26日）を指定して再度お試しください。検索ディレクトリ: {short_path}"
     else:
         return f"「{query}」についてのご質問ありがとうございます。ただいまOllamaサーバーの処理に時間がかかっています。少し時間をおいてから再度お試しいただくか、より具体的な質問を入力してください。"

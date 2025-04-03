@@ -23,13 +23,18 @@ class OneDriveSearch:
         # OneDriveのルートディレクトリを取得（環境に応じて調整が必要）
         self.onedrive_root = os.path.expanduser("~/OneDrive")
 
+        # ユーザー名を取得
+        self.username = os.getenv("USERNAME", "owner")
+
         if not os.path.exists(self.onedrive_root):
             # 標準的なOneDriveパスが見つからない場合は代替パスを試す
             alt_paths = [
                 os.path.expanduser("~/OneDrive - Company"),  # 企業アカウント用
                 os.path.expanduser("~/OneDrive - Personal"),  # 個人アカウント用
-                "C:\\Users\\%s\\OneDrive" % os.getenv("USERNAME"),  # 絶対パス
-                "D:\\OneDrive"  # 別ドライブ
+                f"C:\\Users\\{self.username}\\OneDrive",  # 絶対パス
+                f"D:\\OneDrive",  # 別ドライブ
+                # 共立電機製作所のパターンを追加
+                f"C:\\Users\\{self.username}\\OneDrive - 株式会社　共立電機製作所"
             ]
 
             for path in alt_paths:
@@ -149,7 +154,16 @@ class OneDriveSearch:
 
             # 日付パターンの検索条件
             for date_key in date_keywords:
-                date_conditions.append(f"$_.Name -like '*{date_key}*'")
+                # ファイル名に日付が含まれるかより柔軟に検索
+                date_conditions.append(f"$_.Name -like '*{date_key}*' -or $_.Name -match '{date_key}'")
+                
+                # 日付フォルダ構造にも対応（例：2023/10/26 や 2023-10-26 のようなフォルダ）
+                if len(date_key) == 8 and date_key.isdigit():  # YYYYMMDD形式
+                    year = date_key[:4]
+                    month = date_key[4:6]
+                    day = date_key[6:8]
+                    date_folder_pattern = f"*\\\\{year}*\\\\{month}*\\\\{day}*"
+                    date_conditions.append(f"$_.FullName -like '{date_folder_pattern}'")
 
             # 通常キーワードの検索条件
             for term in search_terms:
@@ -181,6 +195,8 @@ class OneDriveSearch:
 
             # PowerShellコマンドの構築（改善版）
             ps_command = f"""
+            $OutputEncoding = [System.Text.Encoding]::UTF8
+            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
             $ErrorActionPreference = "Continue"
             $results = @()
             try {{
@@ -209,22 +225,44 @@ class OneDriveSearch:
                 ["powershell", "-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", ps_command],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8'
+                text=False  # バイナリモードに変更
             )
 
             stdout, stderr = process.communicate()
 
-            if stderr:
-                logger.error(f"PowerShell検索エラー: {stderr}")
+            # バイナリ出力の適切な処理
+            try:
+                # 複数のエンコーディングでの解読を試みる
+                stdout_text = None
+                for encoding in ['utf-8', 'shift-jis', 'cp932']:
+                    try:
+                        stdout_text = stdout.decode(encoding, errors='replace')
+                        if stdout_text and '[' in stdout_text:
+                            break
+                    except:
+                        continue
+                
+                if not stdout_text:
+                    stdout_text = stdout.decode('utf-8', errors='replace')
+                
+                # ステラーエラー出力の処理
+                if stderr:
+                    try:
+                        stderr_text = stderr.decode('utf-8', errors='replace')
+                        logger.error(f"PowerShell検索エラー: {stderr_text}")
+                    except:
+                        logger.error("PowerShell検索エラー: デコードできないエラーメッセージ")
+            except Exception as e:
+                logger.error(f"PowerShell出力のデコード中にエラー: {str(e)}")
+                stdout_text = ""
 
             # 結果の解析
             results = []
-            if stdout:
+            if stdout_text:
                 try:
-                    json_start = stdout.find('[')
+                    json_start = stdout_text.find('[')
                     if json_start >= 0:
-                        json_data = stdout[json_start:]
+                        json_data = stdout_text[json_start:]
                         parsed_data = json.loads(json_data)
 
                         # 結果が1件の場合、配列に変換
@@ -233,11 +271,11 @@ class OneDriveSearch:
                         else:
                             results = parsed_data
                     else:
-                        logger.warning(f"JSON形式の検索結果が見つかりませんでした: {stdout[:100]}...")
+                        logger.warning(f"JSON形式の検索結果が見つかりませんでした: {stdout_text[:100]}...")
 
                 except json.JSONDecodeError as e:
                     logger.error(f"JSON解析エラー: {e}")
-                    logger.debug(f"解析できないJSON: {stdout[:200]}...")
+                    logger.debug(f"解析できないJSON: {stdout_text[:200]}...")
 
             # 結果のフォーマットと表示
             logger.info(f"検索結果: {len(results)}件")
@@ -308,179 +346,148 @@ class OneDriveSearch:
                     logger.warning(f"サポートされていないファイル形式です: {ext}")
                     return f"このファイル形式({ext})は直接読み込めません。"
 
+        except PermissionError:
+            logger.error(f"ファイル '{file_path}' へのアクセス権限がありません")
+            return f"ファイル '{os.path.basename(file_path)}' へのアクセス権限がありません。システム管理者に確認してください。"
+        except FileNotFoundError:
+            logger.error(f"ファイル '{file_path}' が見つかりません")
+            return f"ファイル '{os.path.basename(file_path)}' が見つかりません。削除または移動された可能性があります。"
         except Exception as e:
             logger.error(f"ファイル読み込み中にエラーが発生しました: {str(e)}")
             return f"ファイル読み込みエラー: {str(e)}"
+
+    def _extract_file_content_helper(self, file_path, ps_command):
+        """
+        PowerShellを使用してファイル内容を抽出する共通ヘルパー
+
+        Args:
+            file_path: ファイルパス
+            ps_command: 実行するPowerShellコマンド
+
+        Returns:
+            抽出したテキスト
+        """
+        try:
+            # PowerShellにエンコーディング設定を追加
+            ps_command = f"$OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {ps_command}"
+            
+            process = subprocess.Popen(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps_command],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False  # バイナリモード
+            )
+
+            stdout, stderr = process.communicate()
+
+            # エンコーディング処理
+            try:
+                for encoding in ['utf-8', 'shift-jis', 'cp932']:
+                    try:
+                        result = stdout.decode(encoding, errors='replace')
+                        if result:
+                            return result
+                    except:
+                        continue
+                
+                # デフォルトフォールバック
+                return stdout.decode('utf-8', errors='replace')
+            except:
+                return "ファイル内容のデコードに失敗しました。"
+
+        except Exception as e:
+            logger.error(f"ファイル処理中にエラーが発生しました: {str(e)}")
+            return f"ファイル処理エラー: {str(e)}"
 
     def _extract_pdf_content(self, file_path):
         """
         PDFファイルからテキストを抽出する（簡易版）
         """
-        try:
-            # PowerShellを使用してPDFからテキストを抽出
-            cmd = f"""
-            Add-Type -AssemblyName System.IO.Compression.FileSystem
-            try {{
-                # ファイルの存在確認
-                if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                    "PDF名: {os.path.basename(file_path)}"
-                    "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                    "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                    "----------------------------------------"
-                    "このPDFからテキスト抽出はサポートされていません"
-                }} else {{
-                    "ファイルが見つかりません: {file_path}"
-                }}
-            }} catch {{
-                "エラーが発生しました: $_"
+        cmd = f"""
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        try {{
+            # ファイルの存在確認
+            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
+                "PDF名: {os.path.basename(file_path)}"
+                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
+                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
+                "----------------------------------------"
+                "このPDFからテキスト抽出はサポートされていません"
+            }} else {{
+                "ファイルが見つかりません: {file_path}"
             }}
-            """
-
-            process = subprocess.Popen(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8'
-            )
-
-            stdout, stderr = process.communicate()
-
-            if stderr:
-                logger.error(f"PDF抽出エラー: {stderr}")
-
-            return stdout if stdout else "PDFからテキストを抽出できませんでした。"
-
-        except Exception as e:
-            logger.error(f"PDF処理中にエラーが発生しました: {str(e)}")
-            return f"PDF処理エラー: {str(e)}"
+        }} catch {{
+            "エラーが発生しました: $_"
+        }}
+        """
+        return self._extract_file_content_helper(file_path, cmd)
 
     def _extract_word_content(self, file_path):
         """
         Wordファイル(docx)からテキストを抽出する
         """
-        try:
-            # PowerShellを使用してWordからテキストを抽出
-            cmd = f"""
-            try {{
-                # ファイルの存在確認
-                if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                    "Word文書名: {os.path.basename(file_path)}"
-                    "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                    "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                    "----------------------------------------"
-                    # Wordアプリケーションを使わず、基本情報のみ表示
-                    "このWord文書からのテキスト抽出はサポートされていません"
-                }} else {{
-                    "ファイルが見つかりません: {file_path}"
-                }}
-            }} catch {{
-                "エラーが発生しました: $_"
+        cmd = f"""
+        try {{
+            # ファイルの存在確認
+            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
+                "Word文書名: {os.path.basename(file_path)}"
+                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
+                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
+                "----------------------------------------"
+                # Wordアプリケーションを使わず、基本情報のみ表示
+                "このWord文書からのテキスト抽出はサポートされていません"
+            }} else {{
+                "ファイルが見つかりません: {file_path}"
             }}
-            """
-
-            process = subprocess.Popen(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8'
-            )
-
-            stdout, stderr = process.communicate()
-
-            if stderr:
-                logger.error(f"Word抽出エラー: {stderr}")
-
-            return stdout if stdout else "Word文書からテキストを抽出できませんでした。"
-
-        except Exception as e:
-            logger.error(f"Word処理中にエラーが発生しました: {str(e)}")
-            return f"Word処理エラー: {str(e)}"
+        }} catch {{
+            "エラーが発生しました: $_"
+        }}
+        """
+        return self._extract_file_content_helper(file_path, cmd)
 
     def _extract_excel_content(self, file_path):
         """
         Excelファイル(xlsx)から基本情報を抽出する
         """
-        try:
-            # PowerShellを使用してExcelファイルの基本情報を抽出
-            cmd = f"""
-            try {{
-                # ファイルの存在確認
-                if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                    "Excel名: {os.path.basename(file_path)}"
-                    "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                    "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                    "----------------------------------------"
-                    "このExcelからのデータ抽出はサポートされていません"
-                }} else {{
-                    "ファイルが見つかりません: {file_path}"
-                }}
-            }} catch {{
-                "エラーが発生しました: $_"
+        cmd = f"""
+        try {{
+            # ファイルの存在確認
+            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
+                "Excel名: {os.path.basename(file_path)}"
+                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
+                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
+                "----------------------------------------"
+                "このExcelからのデータ抽出はサポートされていません"
+            }} else {{
+                "ファイルが見つかりません: {file_path}"
             }}
-            """
-
-            process = subprocess.Popen(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8'
-            )
-
-            stdout, stderr = process.communicate()
-
-            if stderr:
-                logger.error(f"Excel抽出エラー: {stderr}")
-
-            return stdout if stdout else "Excelからデータを抽出できませんでした。"
-
-        except Exception as e:
-            logger.error(f"Excel処理中にエラーが発生しました: {str(e)}")
-            return f"Excel処理エラー: {str(e)}"
+        }} catch {{
+            "エラーが発生しました: $_"
+        }}
+        """
+        return self._extract_file_content_helper(file_path, cmd)
 
     def _extract_powerpoint_content(self, file_path):
         """
         PowerPointファイル(pptx)から基本情報を抽出する
         """
-        try:
-            # PowerShellを使用してPowerPointファイルの基本情報を抽出
-            cmd = f"""
-            try {{
-                # ファイルの存在確認
-                if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                    "PowerPoint名: {os.path.basename(file_path)}"
-                    "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                    "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                    "----------------------------------------"
-                    "このPowerPointからのテキスト抽出はサポートされていません"
-                }} else {{
-                    "ファイルが見つかりません: {file_path}"
-                }}
-            }} catch {{
-                "エラーが発生しました: $_"
+        cmd = f"""
+        try {{
+            # ファイルの存在確認
+            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
+                "PowerPoint名: {os.path.basename(file_path)}"
+                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
+                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
+                "----------------------------------------"
+                "このPowerPointからのテキスト抽出はサポートされていません"
+            }} else {{
+                "ファイルが見つかりません: {file_path}"
             }}
-            """
-
-            process = subprocess.Popen(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8'
-            )
-
-            stdout, stderr = process.communicate()
-
-            if stderr:
-                logger.error(f"PowerPoint抽出エラー: {stderr}")
-
-            return stdout if stdout else "PowerPointからテキストを抽出できませんでした。"
-
-        except Exception as e:
-            logger.error(f"PowerPoint処理中にエラーが発生しました: {str(e)}")
-            return f"PowerPoint処理エラー: {str(e)}"
+        }} catch {{
+            "エラーが発生しました: $_"
+        }}
+        """
+        return self._extract_file_content_helper(file_path, cmd)
 
     def get_relevant_content(self, query, max_files=None, max_chars=8000):
         """

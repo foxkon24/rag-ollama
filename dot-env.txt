@@ -1,5 +1,5 @@
-# .env.example - 環境変数設定サンプル
-# 実際に使用する前に、このファイルを .env にリネームし、適切な値を設定してください
+# .env - 環境変数設定ファイル
+# 実際に使用する前に、適切な値を設定してください
 
 # Flaskアプリ設定
 FLASK_APP=main.py
@@ -28,9 +28,12 @@ TEAMS_OUTGOING_TOKEN=zdnMYCPFHzbZVmJi/P1J8F+DZCl4jqf3L8UVsHu6q84=
 # OneDrive検索機能を有効にするかどうか (1=有効、0=無効)
 ONEDRIVE_SEARCH_ENABLED=1
 
-# OneDriveの検索ディレクトリ（空欄の場合はOneDriveルートを使用）
-# 例: "Documents/Projects" または "C:/Users/Username/OneDrive/Documents"
-ONEDRIVE_SEARCH_DIR=C:\Users\7394\OneDrive - 株式会社　共立電機製作所\7394\report\日報
+# OneDriveの検索ディレクトリ
+# 以下のパスは自動的に検出を試みます:
+# 1. このパスが存在する場合、そのまま使用
+# 2. 存在しない場合、一般的なOneDriveパスを探索
+# 3. それでも見つからない場合は、OneDriveルートディレクトリを使用
+ONEDRIVE_SEARCH_DIR=C:\Users\owner\OneDrive - 株式会社　共立電機製作所\共立電機\019.総務部\日報\近藤
 
 # 検索結果の最大ファイル数
 ONEDRIVE_MAX_FILES=5
