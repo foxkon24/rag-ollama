@@ -1,0 +1,17 @@
+# RAG-Ollamaチャットボットシステム
+
+# プロジェクト構造
+
+rag-ollama/
+├── main.py                # メインアプリケーションエントリーポイント
+├── config.py              # 環境変数と設定管理
+├── logger.py              # ロギング設定
+├── ollama_client.py       # Ollamaとの通信処理
+├── teams_auth.py          # Teams認証関連
+├── teams_webhook.py       # Teams通知機能（既存）
+├── async_processor.py     # 非同期処理
+├── routes.py              # Flaskルート定義
+├── onedrive_searchs.py    # OneDrive検索処理
+├── rgork_rag-ollama.bat   # Flask Webサーバー外部公開バッチファイル
+└── .env                   # 環境変数ファイル
+

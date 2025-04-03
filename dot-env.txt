@@ -1,0 +1,48 @@
+# .env.example - 環境変数設定サンプル
+# 実際に使用する前に、このファイルを .env にリネームし、適切な値を設定してください
+
+# Flaskアプリ設定
+FLASK_APP=main.py
+FLASK_ENV=development
+FLASK_DEBUG=1
+
+# サーバー設定
+HOST=0.0.0.0
+PORT=5010
+
+# Ollamaサーバー設定
+OLLAMA_URL=http://localhost:11434/api/generate
+OLLAMA_MODEL=gemma:2b
+OLLAMA_TIMEOUT=180
+
+# Teams Workflow設定
+# 設定方法: Teamsチャンネル > ... > Workflows > Post to a channel when a webhook request is received
+TEAMS_WORKFLOW_URL=https://prod-33.japaneast.logic.azure.com:443/workflows/823414043ff54c1a95dd805076d26eea/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=OWcHoS9wEZ6-DZkCsKpbSproOy4e5ODZpxACJxXT4u4
+
+# Teams Outgoing Webhook設定
+# 設定方法: Teamsチャンネル > ... > コネクタ > Outgoing Webhook > 設定
+# 表示されたトークンをここに設定
+TEAMS_OUTGOING_TOKEN=zdnMYCPFHzbZVmJi/P1J8F+DZCl4jqf3L8UVsHu6q84=
+
+# OneDrive検索設定
+# OneDrive検索機能を有効にするかどうか (1=有効、0=無効)
+ONEDRIVE_SEARCH_ENABLED=1
+
+# OneDriveの検索ディレクトリ（空欄の場合はOneDriveルートを使用）
+# 例: "Documents/Projects" または "C:/Users/Username/OneDrive/Documents"
+ONEDRIVE_SEARCH_DIR=C:\Users\7394\OneDrive - 株式会社　共立電機製作所\7394\report\日報
+
+# 検索結果の最大ファイル数
+ONEDRIVE_MAX_FILES=5
+
+# 検索対象のファイル拡張子（カンマ区切り、空欄の場合は全ファイル対象）
+# 例: ".txt,.docx,.pdf"
+ONEDRIVE_FILE_TYPES=.pdf,.xlsx,.docx,.pptx,.txt
+
+# デバッグ用設定
+# 署名検証をスキップする場合は1にする
+SKIP_VERIFICATION=0
+
+# ログ設定
+LOG_LEVEL=DEBUG
+LOG_FILE=ollama_system.log
