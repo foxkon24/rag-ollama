@@ -1,11 +1,40 @@
-# onedrive_search.py - OneDriveファイル検索機能（拡張版）
+# onedrive_search.py - OneDriveファイル検索機能（内容抽出機能追加版）
 import os
 import logging
 import subprocess
 import re
 import time
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
+import tempfile
+import shutil
+import sys
+
+# 必要に応じてPyPDF2、python-docx、openpyxlをインポート
+# これらを適切にインストールしておく必要があります
+try:
+    import PyPDF2
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+    
+try:
+    import docx
+    DOCX_SUPPORT = True
+except ImportError:
+    DOCX_SUPPORT = False
+    
+try:
+    import openpyxl
+    EXCEL_SUPPORT = True
+except ImportError:
+    EXCEL_SUPPORT = False
+
+try:
+    from pptx import Presentation
+    PPTX_SUPPORT = True
+except ImportError:
+    PPTX_SUPPORT = False
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -60,76 +89,11 @@ class OneDriveSearch:
         self.search_cache = {}
         self.cache_expiry = 300  # キャッシュの有効期限（秒）
 
-    def enhance_date_detection(self, query):
-        """
-        多様な日付形式を検出し、標準形式に変換する拡張関数
-        
-        Args:
-            query: 検索クエリ
-            
-        Returns:
-            list: 検出された日付の異なる形式のリスト
-        """
-        date_formats = []
-        
-        # YYYY年MM月DD日 形式
-        standard_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
-        if standard_match:
-            year = standard_match.group(1)
-            month = standard_match.group(2).zfill(2)
-            day = standard_match.group(3).zfill(2)
-            date_formats.append(f"{year}{month}{day}")
-            date_formats.append(f"{year}-{month}-{day}")
-            date_formats.append(f"{year}/{month}/{day}")
-            # 元の形式も追加
-            date_formats.append(f"{year}年{month}月{day}日")
-        
-        # YYYY/MM/DD 形式
-        slash_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', query)
-        if slash_match and not standard_match:
-            year = slash_match.group(1)
-            month = slash_match.group(2).zfill(2)
-            day = slash_match.group(3).zfill(2)
-            date_formats.append(f"{year}{month}{day}")
-            date_formats.append(f"{year}-{month}-{day}")
-            date_formats.append(f"{year}/{month}/{day}")
-            date_formats.append(f"{year}年{month}月{day}日")
-        
-        # MM/DD 形式 (当年と仮定)
-        short_date_match = re.search(r'(?<!\d)(\d{1,2})[/\-](\d{1,2})(?!\d)', query)
-        if short_date_match and not standard_match and not slash_match:
-            year = str(datetime.now().year)
-            month = short_date_match.group(1).zfill(2)
-            day = short_date_match.group(2).zfill(2)
-            date_formats.append(f"{year}{month}{day}")
-            date_formats.append(f"{year}-{month}-{day}")
-            date_formats.append(f"{year}/{month}/{day}")
-        
-        # 「今日」「昨日」などの相対日付
-        today = datetime.now()
-        if '今日' in query or '本日' in query:
-            date = today
-            date_formats.append(date.strftime('%Y%m%d'))
-            date_formats.append(date.strftime('%Y-%m-%d'))
-            date_formats.append(date.strftime('%Y/%m/%d'))
-            date_formats.append(date.strftime('%Y年%m月%d日'))
-        
-        if '昨日' in query:
-            date = today - timedelta(days=1)
-            date_formats.append(date.strftime('%Y%m%d'))
-            date_formats.append(date.strftime('%Y-%m-%d'))
-            date_formats.append(date.strftime('%Y/%m/%d'))
-            date_formats.append(date.strftime('%Y年%m月%d日'))
-        
-        if '一昨日' in query:
-            date = today - timedelta(days=2)
-            date_formats.append(date.strftime('%Y%m%d'))
-            date_formats.append(date.strftime('%Y-%m-%d'))
-            date_formats.append(date.strftime('%Y/%m/%d'))
-            date_formats.append(date.strftime('%Y年%m月%d日'))
-        
-        # 重複を削除
-        return list(set(date_formats))
+        # ライブラリサポート状況をログに記録
+        logger.info(f"PDFサポート: {'有効' if PDF_SUPPORT else '無効 - PyPDF2をインストールしてください'}")
+        logger.info(f"DOCXサポート: {'有効' if DOCX_SUPPORT else '無効 - python-docxをインストールしてください'}")
+        logger.info(f"Excelサポート: {'有効' if EXCEL_SUPPORT else '無効 - openpyxlをインストールしてください'}")
+        logger.info(f"PowerPointサポート: {'有効' if PPTX_SUPPORT else '無効 - python-pptxをインストールしてください'}")
 
     def search_files(self, keywords, file_types=None, max_results=None, use_cache=True):
         """
@@ -173,20 +137,21 @@ class OneDriveSearch:
         date_keywords = []
         search_terms = []
 
-        # クエリ文字列を再構築
-        query_text = ' '.join(keywords) if isinstance(keywords, list) else keywords
-
-        # 拡張日付検出
-        date_formats = self.enhance_date_detection(query_text)
-        if date_formats:
-            date_keywords.extend(date_formats)
-            logger.info(f"検出された日付形式: {date_formats}")
-
         for k in keywords:
-            # 日本語検索キーワードは短くして検索精度を上げる
-            if len(k) > 2 and re.search(r'[ぁ-んァ-ン一-龥]', k):
-                # 日付関連のキーワードを除外
-                if not any(date in k for date in ['今日', '昨日', '一昨日', '年', '月', '日']):
+            # 日付形式（YYYY年MM月DD日）を抽出
+            if re.search(r'\d{4}年\d{1,2}月\d{1,2}日', k):
+                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', k)
+                if date_match:
+                    year = date_match.group(1)
+                    month = date_match.group(2).zfill(2)  # 1桁の月を2桁に
+                    day = date_match.group(3).zfill(2)    # 1桁の日を2桁に
+                    date_pattern = f"{year}{month}{day}"
+                    date_pattern2 = f"{year}-{month}-{day}"
+                    date_pattern3 = f"{year}/{month}/{day}"
+                    date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
+            else:
+                # 日本語検索キーワードは短くして検索精度を上げる
+                if len(k) > 2 and re.search(r'[ぁ-んァ-ン一-龥]', k):
                     search_terms.append(k)
 
         # 少なくとも日付キーワードは追加
@@ -200,16 +165,6 @@ class OneDriveSearch:
         # 最低1つのキーワードを確保
         if not search_terms and isinstance(keywords, str) and keywords:
             search_terms = [keywords]
-
-        # 日報、週報、月報など特定文書タイプの重要キーワード
-        report_keywords = ['日報', '週報', '月報', 'report', 'daily', 'weekly', 'monthly']
-        has_report_keyword = any(rk in query_text.lower() for rk in report_keywords)
-        
-        if has_report_keyword:
-            # 日報関連のキーワードを追加
-            for report_key in report_keywords:
-                if report_key in query_text.lower() and report_key not in search_terms:
-                    search_terms.append(report_key)
 
         logger.info(f"OneDrive検索を実行: キーワード={search_terms}, ファイルタイプ={file_types}")
 
@@ -281,7 +236,7 @@ class OneDriveSearch:
             $results = @()
             try {{
                 $files = Get-ChildItem -Path "{search_path}" -Recurse -File -ErrorAction SilentlyContinue
-                $filtered = $files | Where-Object {{ {full_condition} }} | Select-Object -First {max_results + 10}
+                $filtered = $files | Where-Object {{ {full_condition} }} | Select-Object -First {max_results}
                 foreach ($file in $filtered) {{
                     $results += @{{
                         path = $file.FullName
@@ -357,12 +312,6 @@ class OneDriveSearch:
                     logger.error(f"JSON解析エラー: {e}")
                     logger.debug(f"解析できないJSON: {stdout_text[:200]}...")
 
-            # 関連性によるランク付け
-            results = self.rank_search_results(results, search_terms)
-
-            # 最大結果数に制限
-            results = results[:max_results]
-
             # 結果のフォーマットと表示
             logger.info(f"検索結果: {len(results)}件")
             for i, result in enumerate(results[:3]):  # 最初の3件のみログ表示
@@ -380,147 +329,13 @@ class OneDriveSearch:
             logger.error(f"OneDrive検索中にエラーが発生しました: {str(e)}")
             logger.error(f"詳細: {str(e.__class__.__name__)}")
             return []
-            
-    def rank_search_results(self, results, keywords):
-        """
-        検索結果をキーワードとの関連性でランク付け
-        
-        Args:
-            results: 検索結果リスト
-            keywords: 検索キーワードリスト
-            
-        Returns:
-            ランク付けされた検索結果リスト
-        """
-        ranked_results = []
-        
-        for result in results:
-            score = 0
-            path = result.get('path', '').lower()
-            name = result.get('name', '').lower()
-            
-            # ファイル名中のキーワードスコア
-            for keyword in keywords:
-                keyword_lower = keyword.lower()
-                if keyword_lower in name:
-                    score += 10  # ファイル名に直接含まれる場合は高スコア
-                    # 完全一致の場合はさらに高スコア
-                    if name == keyword_lower or f"{keyword_lower}.pdf" == name or f"{keyword_lower}.docx" == name:
-                        score += 20
-                
-                # パス中のキーワードスコア（小さめ）
-                if keyword_lower in path:
-                    score += 3
-            
-            # パス中の関連ディレクトリスコア
-            if '日報' in path:
-                score += 5
-            if 'report' in path:
-                score += 5
-            if '文書' in path or 'documents' in path:
-                score += 3
-                
-            # 最終更新日時の新しさでスコア調整
-            try:
-                modified = result.get('modified', '')
-                if modified:
-                    mod_date = datetime.strptime(modified, '%Y-%m-%d %H:%M:%S')
-                    days_old = (datetime.now() - mod_date).days
-                    if days_old < 30:
-                        score += max(0, 5 - days_old//7)  # 新しいほど高スコア
-            except Exception:
-                pass
-                
-            # 拡張子によるスコア調整
-            if name.endswith('.pdf'):
-                score += 3
-            elif name.endswith('.docx'):
-                score += 2
-            elif name.endswith('.xlsx'):
-                score += 2
-            elif name.endswith('.txt'):
-                score += 1
-                
-            ranked_results.append((score, result))
-        
-        # スコア順にソート（降順）
-        ranked_results.sort(reverse=True, key=lambda x: x[0])
-        return [item[1] for item in ranked_results]
 
-    def optimize_file_content(self, content, query, max_chars=4000):
+    def read_file_content(self, file_path):
         """
-        ファイル内容をクエリに最も関連する部分に絞り込む
-        
-        Args:
-            content: ファイル内容
-            query: 検索クエリ
-            max_chars: 最大文字数
-            
-        Returns:
-            最適化されたファイル内容
-        """
-        # クエリからキーワードを抽出
-        keywords = [k for k in query.split() 
-                    if len(k) > 1 and k.lower() not in ["について", "とは", "の", "を", "に", "は", "で", "が"]]
-        
-        # 内容が短い場合はそのまま返す
-        if len(content) <= max_chars:
-            return content
-            
-        # 段落分割
-        paragraphs = re.split(r'\n\s*\n', content)
-        
-        # 各段落のスコア付け
-        scored_paragraphs = []
-        for p in paragraphs:
-            if not p.strip():
-                continue
-                
-            score = 0
-            for keyword in keywords:
-                if keyword.lower() in p.lower():
-                    score += p.lower().count(keyword.lower())
-                    
-            # 日付形式を含む段落を優先
-            if re.search(r'\d{4}[-/年]\d{1,2}[-/月]\d{1,2}', p):
-                score += 5
-                
-            scored_paragraphs.append((score, p))
-        
-        # スコア順にソート
-        scored_paragraphs.sort(reverse=True, key=lambda x: x[0])
-        
-        # 最も関連性の高い段落を結合（上限まで）
-        result = ""
-        char_count = 0
-        
-        # スコアが0のものは除外
-        filtered_paragraphs = [p for s, p in scored_paragraphs if s > 0]
-        
-        # スコアが高いものが見つからない場合は、最初の部分を返す
-        if not filtered_paragraphs:
-            return content[:max_chars]
-        
-        for score, p in scored_paragraphs:
-            if score == 0 and char_count > max_chars // 2:
-                # スコアが0で、すでに十分な内容がある場合はスキップ
-                continue
-                
-            if char_count + len(p) + 2 > max_chars:
-                break
-                
-            result += p + "\n\n"
-            char_count += len(p) + 2
-        
-        return result
-
-    def read_file_content(self, file_path, query=None):
-        """
-        ファイルの内容を読み込む
+        ファイルの内容を読み込む（改善版）
 
         Args:
             file_path: 読み込むファイルパス
-            query: 検索クエリ（内容の最適化に使用）
 
         Returns:
             ファイルの内容（文字列）
@@ -535,39 +350,16 @@ class OneDriveSearch:
 
             if is_text:
                 # テキストファイルとして読み込み
-                encodings = ['utf-8', 'shift-jis', 'cp932', 'euc-jp', 'iso-2022-jp']
-
-                for encoding in encodings:
-                    try:
-                        with open(file_path, 'r', encoding=encoding, errors='replace') as f:
-                            content = f.read()
-                            logger.info(f"テキストファイルとして読み込みました ({encoding}): {file_path}")
-                            
-                            # 検索クエリがある場合は内容を最適化
-                            if query:
-                                return self.optimize_file_content(content, query)
-                            return content
-                    except UnicodeDecodeError:
-                        continue
-
-                # 全てのエンコーディングで失敗した場合
-                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                    content = f.read()
-                    logger.warning(f"代替エンコーディングで読み込みました: {file_path}")
-                    
-                    # 検索クエリがある場合は内容を最適化
-                    if query:
-                        return self.optimize_file_content(content, query)
-                    return content
+                return self._read_text_file(file_path)
             else:
-                # バイナリファイルの場合はPowerShellを使用して内容を抽出
-                if ext in ['.pdf']:
+                # バイナリファイルの処理
+                if ext == '.pdf':
                     return self._extract_pdf_content(file_path)
-                elif ext in ['.docx']:
+                elif ext == '.docx':
                     return self._extract_word_content(file_path)
-                elif ext in ['.xlsx']:
+                elif ext == '.xlsx':
                     return self._extract_excel_content(file_path)
-                elif ext in ['.pptx']:
+                elif ext == '.pptx':
                     return self._extract_powerpoint_content(file_path)
                 else:
                     # サポートされていないファイル形式
@@ -584,270 +376,300 @@ class OneDriveSearch:
             logger.error(f"ファイル読み込み中にエラーが発生しました: {str(e)}")
             return f"ファイル読み込みエラー: {str(e)}"
 
-    def _extract_file_content_helper(self, file_path, ps_command):
+    def _read_text_file(self, file_path):
         """
-        PowerShellを使用してファイル内容を抽出する共通ヘルパー
+        テキストファイルの内容を読み込む
 
         Args:
             file_path: ファイルパス
-            ps_command: 実行するPowerShellコマンド
 
         Returns:
-            抽出したテキスト
+            テキスト内容
         """
-        try:
-            # PowerShellにエンコーディング設定を追加
-            ps_command = f"$OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {ps_command}"
-            
-            process = subprocess.Popen(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps_command],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False  # バイナリモード
-            )
+        encodings = ['utf-8', 'shift-jis', 'cp932', 'euc-jp', 'iso-2022-jp']
 
-            stdout, stderr = process.communicate()
-
-            # エンコーディング処理
+        for encoding in encodings:
             try:
-                for encoding in ['utf-8', 'shift-jis', 'cp932']:
-                    try:
-                        result = stdout.decode(encoding, errors='replace')
-                        if result:
-                            return result
-                    except:
-                        continue
-                
-                # デフォルトフォールバック
-                return stdout.decode('utf-8', errors='replace')
-            except:
-                return "ファイル内容のデコードに失敗しました。"
+                with open(file_path, 'r', encoding=encoding, errors='replace') as f:
+                    content = f.read()
+                    logger.info(f"テキストファイルとして読み込みました ({encoding}): {file_path}")
+                    return content
+            except UnicodeDecodeError:
+                continue
 
-        except Exception as e:
-            logger.error(f"ファイル処理中にエラーが発生しました: {str(e)}")
-            return f"ファイル処理エラー: {str(e)}"
+        # 全てのエンコーディングで失敗した場合
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+            logger.warning(f"代替エンコーディングで読み込みました: {file_path}")
+            return content
 
     def _extract_pdf_content(self, file_path):
         """
-        PDFファイルからテキストを抽出する（簡易版）
-        """
-        cmd = f"""
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        try {{
-            # ファイルの存在確認
-            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "PDF名: {os.path.basename(file_path)}"
-                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                "----------------------------------------"
-                "このPDFからテキスト抽出はサポートされていません"
-            }} else {{
-                "ファイルが見つかりません: {file_path}"
-            }}
-        }} catch {{
-            "エラーが発生しました: $_"
-        }}
-        """
-        return self._extract_file_content_helper(file_path, cmd)
+        PDFファイルからテキストを抽出する（改善版）
         
-    def _extract_excel_content(self, file_path):
-        """
-        Excelファイル(xlsx)から基本情報を抽出する
-        """
-        cmd = f"""
-        try {{
-            # ファイルの存在確認
-            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "Excel名: {os.path.basename(file_path)}"
-                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                "----------------------------------------"
-                "このExcelからのデータ抽出はサポートされていません"
-            }} else {{
-                "ファイルが見つかりません: {file_path}"
-            }}
-        }} catch {{
-            "エラーが発生しました: $_"
-        }}
-        """
-        return self._extract_file_content_helper(file_path, cmd)
-
-    def _extract_powerpoint_content(self, file_path):
-        """
-        PowerPointファイル(pptx)から基本情報を抽出する
-        """
-        cmd = f"""
-        try {{
-            # ファイルの存在確認
-            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "PowerPoint名: {os.path.basename(file_path)}"
-                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                "----------------------------------------"
-                "このPowerPointからのテキスト抽出はサポートされていません"
-            }} else {{
-                "ファイルが見つかりません: {file_path}"
-            }}
-        }} catch {{
-            "エラーが発生しました: $_"
-        }}
-        """
-        return self._extract_file_content_helper(file_path, cmd)
-
-    def get_relevant_content(self, query, max_files=None, max_chars=8000):
-        """
-        クエリに関連する内容を取得
-
         Args:
-            query: 検索クエリ
-            max_files: 取得する最大ファイル数
-            max_chars: 取得する最大文字数
-
+            file_path: PDFファイルのパス
+            
         Returns:
-            関連コンテンツ（文字列）
+            抽出したテキスト
         """
-        # 最大ファイル数の設定
-        if max_files is None:
-            max_files = self.max_results
-
-        # 拡張日付検出
-        date_formats = self.enhance_date_detection(query)
-        date_str = None
-        if date_formats:
-            # 年月日形式を優先
-            for fmt in date_formats:
-                if "年" in fmt:
-                    date_str = fmt
-                    break
-            if not date_str:
-                date_str = date_formats[0]
-            logger.info(f"日付指定を検出: {date_str}")
-
-        # 検索クエリからストップワードを除去
-        stop_words = ["について", "とは", "の", "を", "に", "は", "で", "が", "と", "から", "へ", "より", 
-                     "内容", "知りたい", "あったのか", "何", "教えて", "どのような", "どんな", "ありました",
-                     "the", "a", "an", "and", "or", "of", "to", "in", "for", "on", "by"]
-
-        # クエリから重要な単語を抽出
-        keywords = []
-
-        # 先に日付を追加（もし存在すれば）
-        if date_str:
-            keywords.append(date_str)
-
-        # その他のキーワードを追加
-        for word in query.split():
-            clean_word = word.strip(',.;:!?()[]{}"\'')
-            if clean_word and len(clean_word) > 1 and clean_word.lower() not in stop_words:
-                # 日付文字列の一部でなければ追加
-                if date_str and date_str not in clean_word:
-                    keywords.append(clean_word)
-                elif not date_str:
-                    keywords.append(clean_word)
+        # ファイル情報の基本ヘッダー
+        file_info = f"PDF名: {os.path.basename(file_path)}\n"
+        try:
+            file_stat = os.stat(file_path)
+            file_info += f"ファイルサイズ: {file_stat.st_size} bytes\n"
+            file_info += f"最終更新日時: {datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')}\n"
+            file_info += "----------------------------------------\n"
+        except:
+            file_info += "ファイル情報の取得に失敗しました\n"
+            file_info += "----------------------------------------\n"
+        
+        # PyPDF2が利用可能な場合、Pythonで抽出
+        if PDF_SUPPORT:
+            try:
+                text = ""
+                with open(file_path, 'rb') as f:
+                    pdf_reader = PyPDF2.PdfReader(f)
+                    num_pages = len(pdf_reader.pages)
+                    
+                    for page_num in range(num_pages):
+                        page = pdf_reader.pages[page_num]
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += f"--- ページ {page_num + 1} ---\n{page_text}\n\n"
+                
+                if text:
+                    return file_info + text
                 else:
-                    pass
-
-        # 日報キーワードの追加
-        report_keywords = ['日報', '週報', '月報', '業務報告']
-        for report_word in report_keywords:
-            if report_word in query and report_word not in keywords:
-                keywords.append(report_word)
-
-        # キーワードが少なすぎる場合のバックアップとして日報関連の単語を追加
-        if len(keywords) < 2:
-            if "日報" not in query.lower() and not any(k for k in keywords if "日報" in k):
-                keywords.append("日報")
-
-        if not keywords:
-            return "検索キーワードが見つかりませんでした。具体的な日付や単語で検索してください。"
-
-        logger.info(f"抽出されたキーワード: {keywords}")
-
-        # ファイル検索
-        search_results = self.search_files(keywords, max_results=max_files)
-
-        if not search_results:
-            keywords_str = ", ".join(keywords)
-            # 日付指定がある場合は特別なメッセージ
-            if date_str:
-                return f"{date_str}の日報は見つかりませんでした。日付の表記が正しいか確認してください。"
-            else:
-                return f"キーワード '{keywords_str}' に関連するファイルは見つかりませんでした。"
-
-        # 関連コンテンツの取得
-        relevant_content = f"--- {len(search_results)}件の関連ファイルが見つかりました ---\n\n"
-        total_chars = len(relevant_content)
-
-        for i, result in enumerate(search_results):
-            file_path = result.get('path')
-            file_name = result.get('name')
-            modified = result.get('modified', '不明')
-
-            # ファイルの内容を読み込み
-            content = self.read_file_content(file_path, query)
-
-            # コンテンツの最適化（クエリに関連する部分を優先的に抽出）
-            if len(content) > 2000:
-                content = self.optimize_file_content(content, query, 2000)
-
-            file_content = f"=== ファイル {i+1}: {file_name} ===\n"
-            file_content += f"更新日時: {modified}\n"
-            file_content += f"{content}\n\n"
-
-            # 最大文字数をチェック
-            if total_chars + len(file_content) > max_chars:
-                # 制限に達した場合は切り詰め
-                remaining = max_chars - total_chars - 100  # 終了メッセージ用に余裕を持たせる
-                if remaining > 0:
-                    file_content = file_content[:remaining] + "...\n"
-                else:
-                    # もう追加できない場合
-                    relevant_content += f"\n（残り{len(search_results) - i}件のファイルは文字数制限のため表示されません）"
-                    break
-
-            relevant_content += file_content
-            total_chars += len(file_content)
-
-        return relevant_content
-
-# 使用例
-if __name__ == "__main__":
-    # ロギングの設定
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-
-    # インスタンス作成
-    onedrive_search = OneDriveSearch()
-
-    # 検索クエリ
-    test_query = "2024年10月26日の日報内容"
-
-    # 関連コンテンツを取得
-    content = onedrive_search.get_relevant_content(test_query)
-
-    print(f"検索結果: {content[:500]}...")  # 最初の500文字のみ表示
+                    logger.warning("PDFからテキストを抽出できませんでした。PowerShellによる抽出を試みます。")
+            except Exception as e:
+                logger.error(f"PyPDF2でのPDF抽出エラー: {str(e)}")
+                # エラーが発生した場合、PowerShellによる抽出を試みる
+        
+        # PowerShellを使用した抽出を試みる
+        try:
+            # 一時ファイルを作成してPDF内容を抽出する際の安全対策
+            temp_output = os.path.join(tempfile.gettempdir(), f"pdf_extract_{os.path.basename(file_path)}.txt")
+            
+            ps_command = f"""
+            $OutputEncoding = [System.Text.Encoding]::UTF8
+            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+            
+            try {{
+                # Word.Application経由でPDFを開いてテキストに変換する方法
+                $word = New-Object -ComObject Word.Application
+                $word.Visible = $false
+                
+                try {{
+                    $document = $word.Documents.Open("{file_path}")
+                    $text = $document.Content.Text
+                    $document.Close()
+                    $word.Quit()
+                    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($word)
+                    
+                    # 抽出したテキストを返す
+                    $text
+                }} catch {{
+                    # Word経由での抽出に失敗した場合、基本情報と共にエラーメッセージを返す
+                    "PDFの内容抽出中にエラーが発生しました: $_`nこのPDFファイルはテキスト抽出に対応していないか、保護されている可能性があります。"
+                }}
+            }} catch {{
+                "PDFテキスト抽出エラー: $_"
+            }}
+            """
+            
+            # PowerShellコマンドを実行
+            result = self._extract_file_content_helper(file_path, ps_command)
+            
+            # 結果が空または短すぎる場合
+            if not result or len(result) < 50:
+                return file_info + "このPDFからテキストを抽出できませんでした。スキャンされたPDFやテキストレイヤーのないPDFの可能性があります。"
+            
+            return file_info + result
+            
+        except Exception as e:
+            logger.error(f"PDF抽出中にエラーが発生しました: {str(e)}")
+            return file_info + "PDFコンテンツの抽出中にエラーが発生しました。"
 
     def _extract_word_content(self, file_path):
         """
-        Wordファイル(docx)からテキストを抽出する
+        Wordファイル(docx)からテキストを抽出する（改善版）
+        
+        Args:
+            file_path: Wordファイルのパス
+            
+        Returns:
+            抽出したテキスト
         """
-        cmd = f"""
-        try {{
-            # ファイルの存在確認
-            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "Word文書名: {os.path.basename(file_path)}"
-                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                "----------------------------------------"
-                # Wordアプリケーションを使わず、基本情報のみ表示
-                "このWord文書からのテキスト抽出はサポートされていません"
-            }} else {{
-                "ファイルが見つかりません: {file_path}"
+        # ファイル情報の基本ヘッダー
+        file_info = f"Word文書名: {os.path.basename(file_path)}\n"
+        try:
+            file_stat = os.stat(file_path)
+            file_info += f"ファイルサイズ: {file_stat.st_size} bytes\n"
+            file_info += f"最終更新日時: {datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')}\n"
+            file_info += "----------------------------------------\n"
+        except:
+            file_info += "ファイル情報の取得に失敗しました\n"
+            file_info += "----------------------------------------\n"
+        
+        # python-docxが利用可能な場合、Pythonで抽出
+        if DOCX_SUPPORT:
+            try:
+                text = ""
+                doc = docx.Document(file_path)
+                
+                # 段落のテキストを抽出
+                for para in doc.paragraphs:
+                    if para.text.strip():
+                        text += para.text + "\n"
+                
+                # 表のテキストを抽出
+                for table in doc.tables:
+                    for row in table.rows:
+                        row_text = []
+                        for cell in row.cells:
+                            row_text.append(cell.text.strip())
+                        text += " | ".join(row_text) + "\n"
+                    text += "\n"
+                
+                if text:
+                    return file_info + text
+                else:
+                    logger.warning("Word文書からテキストを抽出できませんでした。PowerShellによる抽出を試みます。")
+            except Exception as e:
+                logger.error(f"python-docxでのWord抽出エラー: {str(e)}")
+                # エラーが発生した場合、PowerShellによる抽出を試みる
+        
+        # PowerShellを使用した抽出を試みる
+        try:
+            ps_command = f"""
+            $OutputEncoding = [System.Text.Encoding]::UTF8
+            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+            
+            try {{
+                # Word.Application経由でdocxを開いてテキストに変換
+                $word = New-Object -ComObject Word.Application
+                $word.Visible = $false
+                
+                try {{
+                    $document = $word.Documents.Open("{file_path}")
+                    $text = $document.Content.Text
+                    $document.Close()
+                    $word.Quit()
+                    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($word)
+                    
+                    # 抽出したテキストを返す
+                    $text
+                }} catch {{
+                    # Word経由での抽出に失敗した場合、基本情報と共にエラーメッセージを返す
+                    "Word文書の内容抽出中にエラーが発生しました: $_`nこのWord文書はテキスト抽出に対応していないか、保護されている可能性があります。"
+                }}
+            }} catch {{
+                "Wordテキスト抽出エラー: $_"
             }}
-        }} catch {{
-            "エラーが発生しました: $_"
-        }}
+            """
+            
+            # PowerShellコマンドを実行
+            result = self._extract_file_content_helper(file_path, ps_command)
+            
+            # 結果が空または短すぎる場合
+            if not result or len(result) < 50:
+                return file_info + "このWord文書からテキストを抽出できませんでした。"
+            
+            return file_info + result
+            
+        except Exception as e:
+            logger.error(f"Word抽出中にエラーが発生しました: {str(e)}")
+            return file_info + "Word文書のコンテンツの抽出中にエラーが発生しました。"
+
+    def _extract_excel_content(self, file_path):
         """
-        return self._extract_file_content_helper(file_path, cmd)
+        Excelファイル(xlsx)から内容を抽出する（改善版）
+        
+        Args:
+            file_path: Excelファイルのパス
+            
+        Returns:
+            抽出したテキスト
+        """
+        # ファイル情報の基本ヘッダー
+        file_info = f"Excel名: {os.path.basename(file_path)}\n"
+        try:
+            file_stat = os.stat(file_path)
+            file_info += f"ファイルサイズ: {file_stat.st_size} bytes\n"
+            file_info += f"最終更新日時: {datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')}\n"
+            file_info += "----------------------------------------\n"
+        except:
+            file_info += "ファイル情報の取得に失敗しました\n"
+            file_info += "----------------------------------------\n"
+        
+        # PowerShellを使用した抽出を試みる
+        try:
+            ps_command = f"""
+            $OutputEncoding = [System.Text.Encoding]::UTF8
+            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+            
+            try {{
+                # Excel.Application経由でxlsxを開いてテキストに変換
+                $excel = New-Object -ComObject Excel.Application
+                $excel.Visible = $false
+                $excel.DisplayAlerts = $false
+                
+                try {{
+                    $workbook = $excel.Workbooks.Open("{file_path}")
+                    $text = ""
+                    
+                    # 各シートのデータを抽出
+                    foreach ($sheet in $workbook.Sheets) {{
+                        $text += "`n### シート: $($sheet.Name) ###`n"
+                        
+                        # 使用範囲のデータを取得
+                        $usedRange = $sheet.UsedRange
+                        $rows = $usedRange.Rows.Count
+                        $cols = $usedRange.Columns.Count
+                        
+                        if ($rows -gt 0 -and $cols -gt 0) {{
+                            for ($r = 1; $r -le [Math]::Min($rows, 100); $r++) {{
+                                $rowText = ""
+                                for ($c = 1; $c -le [Math]::Min($cols, 20); $c++) {{
+                                    $cell = $usedRange.Cells.Item($r, $c).Text
+                                    $rowText += "$cell | "
+                                }}
+                                $text += "$rowText`n"
+                            }}
+                            
+                            if ($rows -gt 100 -or $cols -gt 20) {{
+                                $text += "（大きなシートのため、一部のデータのみ表示しています）`n"
+                            }}
+                        }} else {{
+                            $text += "（このシートにはデータがありません）`n"
+                        }}
+                    }}
+                    
+                    $workbook.Close($false)
+                    $excel.Quit()
+                    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel)
+                    
+                    # 抽出したテキストを返す
+                    $text
+                }} catch {{
+                    # Excel経由での抽出に失敗した場合、基本情報と共にエラーメッセージを返す
+                    "Excelファイルの内容抽出中にエラーが発生しました: $_`nこのExcelファイルはテキスト抽出に対応していないか、保護されている可能性があります。"
+                }}
+            }} catch {{
+                "Excelテキスト抽出エラー: $_"
+            }}
+            """
+            
+            # PowerShellコマンドを実行
+            result = self._extract_file_content_helper(file_path, ps_command)
+            
+            # 結果が空または短すぎる場合
+            if not result or len(result) < 50:
+                return file_info + "このExcelファイルからデータを抽出できませんでした。"
+            
+            return file_info + result
+            
+        except Exception as e:
+            logger.error(f"Excel抽出中にエラーが発生しました: {str(e)}")
+            return file_info + "Excelファイルのデータ抽出中にエラーが発生しました。"

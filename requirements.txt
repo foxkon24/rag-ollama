@@ -1,0 +1,9 @@
+# RAG-Ollama必要ライブラリ
+flask==2.2.3
+requests==2.28.2
+python-dotenv==0.21.1
+# ファイル内容抽出用ライブラリ
+PyPDF2==2.10.9
+python-docx==0.8.11
+openpyxl==3.0.10
+python-pptx==0.6.21
