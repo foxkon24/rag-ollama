@@ -1,4 +1,4 @@
-# teams_webhook.py - Logic Apps Workflowに対応した通知機能（再修正版）
+# teams_webhook.py - 改良されたTeams通知機能
 import requests
 import logging
 import json
@@ -21,14 +21,14 @@ class TeamsWebhook:
         self.webhook_url = webhook_url
         logger.info(f"Teams Workflowを初期化: {webhook_url[:30]}...")
 
-    def send_ollama_response(self, query, response, conversation_data=None, search_path=None):
+    def send_ollama_response(self, query, response, search_results=None, search_path=None):
         """
-        Ollamaの応答をTeams Workflowに送信する
+        Ollamaの応答をTeams Workflowに送信する（改良版）
 
         Args:
             query: ユーザーの質問
             response: Ollamaからの応答
-            conversation_data: 会話データ（オプション）
+            search_results: 検索結果のリスト（オプション）
             search_path: 検索に使用したディレクトリパス（オプション）
 
         Returns:
@@ -41,8 +41,46 @@ class TeamsWebhook:
             # 現在の日時
             now = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
             
-            # 'attachments'配列が直接ルートレベルにある形式
-            root_attachments_payload = {
+            # 検索結果のサマリーを作成
+            files_info = ""
+            if search_results and len(search_results) > 0:
+                files_info = "\n".join([f"- {r.get('name')} ({r.get('modified')})" for r in search_results[:3]])
+                if len(search_results) > 3:
+                    files_info += f"\n- 他 {len(search_results)-3} 件のファイル"
+            else:
+                files_info = "関連ファイルは見つかりませんでした"
+            
+            # 拡張されたTeamsカード形式
+            enhanced_card = self.create_enhanced_card(query, response, search_results, search_path)
+            
+            # リクエストヘッダー
+            headers = {
+                'Content-Type': 'application/json'
+            }
+
+            # 1. 拡張カード形式で試行
+            logger.debug(f"Logic Apps送信ペイロード(拡張カード): {json.dumps(enhanced_card)[:300]}...")
+
+            try:
+                r = requests.post(
+                    self.webhook_url, 
+                    json=enhanced_card, 
+                    headers=headers,
+                    timeout=30
+                )
+                logger.debug(f"Logic Apps応答(拡張カード): {r.status_code}, {r.text[:100] if r.text else '空のレスポンス'}")
+
+                if r.status_code >= 200 and r.status_code < 300:
+                    logger.info(f"拡張カード形式でのLogic Apps通知送信成功: {r.status_code}")
+                    return {"status": "success", "code": r.status_code, "format": "拡張カード"}
+                else:
+                    logger.warning(f"拡張カード形式での送信失敗: {r.status_code}。従来形式で再試行します。")
+
+            except Exception as e:
+                logger.warning(f"拡張カード形式送信エラー: {str(e)}。従来形式で再試行します。")
+            
+            # 従来形式のペイロード
+            legacy_payload = {
                 "attachments": [
                     {
                         "contentType": "application/vnd.microsoft.card.adaptive",
@@ -91,86 +129,6 @@ class TeamsWebhook:
                 ]
             }
 
-            # バックアップ用のシンプルなペイロード
-            simple_payload = {
-                "text": f"### Ollama回答\n\n**質問**: {query}\n\n**検索対象**: {short_path}\n\n{response}\n\n*回答生成時刻: {now}*"
-            }
-
-            # 旧形式のペイロード（既存形式）
-            legacy_payload = {
-                "body": {
-                    "attachments": [
-                        {
-                            "contentType": "application/vnd.microsoft.card.adaptive",
-                            "content": {
-                                "type": "AdaptiveCard",
-                                "body": [
-                                    {
-                                        "type": "TextBlock",
-                                        "size": "Medium",
-                                        "weight": "Bolder",
-                                        "text": "Ollama回答",
-                                        "wrap": True
-                                    },
-                                    {
-                                        "type": "TextBlock",
-                                        "text": f"質問: {query}",
-                                        "wrap": True,
-                                        "weight": "Bolder"
-                                    },
-                                    {
-                                        "type": "TextBlock",
-                                        "text": f"検索対象: {short_path}",
-                                        "wrap": True,
-                                        "size": "Small"
-                                    },
-                                    {
-                                        "type": "TextBlock",
-                                        "text": response,
-                                        "wrap": True
-                                    },
-                                    {
-                                        "type": "TextBlock",
-                                        "text": f"回答生成時刻: {now}",
-                                        "wrap": True,
-                                        "size": "Small",
-                                        "isSubtle": True
-                                    }
-                                ],
-                                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                                "version": "1.0"
-                            }
-                        }
-                    ]
-                }
-            }
-
-            # リクエストヘッダー
-            headers = {
-                'Content-Type': 'application/json'
-            }
-
-            # 1. まず新しいルートレベルのattachments形式で試行
-            logger.debug(f"Logic Apps送信ペイロード(ルートレベルattachments): {json.dumps(root_attachments_payload)[:300]}...")
-
-            try:
-                r = requests.post(
-                    self.webhook_url, 
-                    json=root_attachments_payload, 
-                    headers=headers,
-                    timeout=30
-                )
-                logger.debug(f"Logic Apps応答(ルートレベルattachments): {r.status_code}, {r.text[:100] if r.text else '空のレスポンス'}")
-
-                if r.status_code >= 200 and r.status_code < 300:
-                    logger.info(f"ルートレベルattachments形式でのLogic Apps通知送信成功: {r.status_code}")
-                    return {"status": "success", "code": r.status_code, "format": "ルートレベルattachments"}
-                else:
-                    logger.warning(f"ルートレベルattachments形式での送信失敗: {r.status_code}。従来形式で再試行します。")
-
-            except Exception as e:
-                logger.warning(f"ルートレベルattachments形式送信エラー: {str(e)}。従来形式で再試行します。")
-
             # 2. 従来形式で試行
             logger.debug(f"Logic Apps送信ペイロード(従来形式): {json.dumps(legacy_payload)[:300]}...")
 
@@ -191,6 +149,11 @@ class TeamsWebhook:
 
             except Exception as e2:
                 logger.warning(f"従来形式送信エラー: {str(e2)}。シンプル形式で再試行します。")
+            
+            # バックアップ用のシンプルなペイロード
+            simple_payload = {
+                "text": f"### Ollama回答\n\n**質問**: {query}\n\n**検索対象**: {short_path}\n\n{response}\n\n*回答生成時刻: {now}*"
+            }
 
             # 3. シンプル形式で試行（最後の手段）
             logger.debug(f"Logic Apps送信ペイロード(シンプル): {json.dumps(simple_payload)[:300]}...")
@@ -219,6 +182,97 @@ class TeamsWebhook:
             logger.error(f"Logic Apps通知の送信中にエラーが発生しました: {str(e)}")
             logger.error(traceback.format_exc())
             return {"status": "error", "message": str(e)}
+    
+    def create_enhanced_card(self, query, response, search_results, search_path):
+        """
+        改善されたTeams通知カードを作成する
+
+        Args:
+            query: ユーザーの質問
+            response: Ollamaからの応答
+            search_results: 検索結果リスト
+            search_path: 検索パス
+            
+        Returns:
+            dict: カードデータ
+        """
+        now = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
+        short_path = self._get_shortened_path(search_path)
+        
+        # 検索結果サマリー
+        found_files = ""
+        if search_results and len(search_results) > 0:
+            for i, result in enumerate(search_results[:3]):  # 上位3件表示
+                file_name = result.get('name', '不明')
+                modified = result.get('modified', '不明')
+                found_files += f"- {file_name} (更新: {modified})\n"
+            
+            if len(search_results) > 3:
+                found_files += f"- 他 {len(search_results)-3} 件のファイル\n"
+        else:
+            found_files = "関連ファイルは見つかりませんでした"
+        
+        return {
+            "attachments": [
+                {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": {
+                        "type": "AdaptiveCard",
+                        "body": [
+                            {
+                                "type": "TextBlock",
+                                "size": "Medium",
+                                "weight": "Bolder",
+                                "text": "Ollama回答",
+                                "wrap": True
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": f"質問: {query}",
+                                "wrap": True,
+                                "weight": "Bolder",
+                                "color": "Accent"
+                            },
+                            {
+                                "type": "FactSet",
+                                "facts": [
+                                    {"title": "検索場所", "value": short_path},
+                                    {"title": "検索結果", "value": f"{len(search_results) if search_results else 0}件のファイル"}
+                                ]
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": "見つかったファイル:",
+                                "wrap": True,
+                                "size": "Small"
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": found_files,
+                                "wrap": True,
+                                "size": "Small",
+                                "isSubtle": True
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": response,
+                                "wrap": True,
+                                "spacing": "Medium"
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": f"回答生成時刻: {now}",
+                                "wrap": True,
+                                "size": "Small",
+                                "isSubtle": True
+                            }
+                        ],
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "version": "1.0"
+                    }
+                }
+            ]
+        }
     
     def _get_shortened_path(self, path):
         """
@@ -263,8 +317,8 @@ class TeamsWebhook:
         
         return path
 
-    def send_direct_message(self, query, response, search_path=None):
+    def send_direct_message(self, query, response, search_results=None, search_path=None):
         """
         send_ollama_responseのエイリアス（下位互換性のため）
         """
-        return self.send_ollama_response(query, response, None, search_path)
+        return self.send_ollama_response(query, response, search_results, search_path)

@@ -1,4 +1,4 @@
-# routes.py - Flaskルート定義（OneDrive検索機能追加版）
+# routes.py - 改良されたFlaskルート定義
 import re
 import logging
 import threading
@@ -70,6 +70,8 @@ def register_routes(app, config, teams_webhook, onedrive_search=None):
                 # OneDrive検索が有効かどうかを確認
                 if onedrive_search:
                     logger.info("OneDrive検索機能が有効です")
+                    # OneDrive検索ディレクトリを表示
+                    logger.info(f"検索ディレクトリ: {onedrive_search.base_directory}")
                 else:
                     logger.info("OneDrive検索機能は無効です")
 
@@ -116,16 +118,20 @@ def register_routes(app, config, teams_webhook, onedrive_search=None):
             
             # OneDrive検索の状態を確認
             onedrive_status = onedrive_search is not None
+            onedrive_path = onedrive_search.base_directory if onedrive_status else "未設定"
 
-            return jsonify({
+            response_data = {
                 "status": "ok" if ollama_status else "degraded",
                 "timestamp": datetime.now().isoformat(),
                 "system": "Ollama OneDrive Knowledge System",
                 "ollama_status": "connected" if ollama_status else "disconnected",
                 "teams_webhook_status": "configured" if teams_webhook_status else "not configured",
                 "onedrive_status": "enabled" if onedrive_status else "disabled",
+                "onedrive_path": onedrive_path,
                 "model": config['OLLAMA_MODEL']
-            })
+            }
+            
+            return jsonify(response_data)
 
         except Exception as e:
             logger.error(f"ヘルスチェック中にエラーが発生しました: {str(e)}")
@@ -141,4 +147,5 @@ def register_routes(app, config, teams_webhook, onedrive_search=None):
             return render_template('index.html')
         except:
             is_onedrive = "有効" if onedrive_search else "無効"
-            return f"Ollama Webhook System is running! OneDrive検索機能: {is_onedrive}"
+            onedrive_path = onedrive_search.base_directory if onedrive_search else "未設定"
+            return f"Ollama Webhook System is running! OneDrive検索機能: {is_onedrive}, 検索パス: {onedrive_path}"

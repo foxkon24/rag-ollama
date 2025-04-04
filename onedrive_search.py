@@ -1,11 +1,11 @@
-# onedrive_search.py - OneDriveファイル検索機能（日本語対応改善版）
+# onedrive_search.py - OneDriveファイル検索機能（拡張版）
 import os
 import logging
 import subprocess
 import re
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -60,6 +60,77 @@ class OneDriveSearch:
         self.search_cache = {}
         self.cache_expiry = 300  # キャッシュの有効期限（秒）
 
+    def enhance_date_detection(self, query):
+        """
+        多様な日付形式を検出し、標準形式に変換する拡張関数
+        
+        Args:
+            query: 検索クエリ
+            
+        Returns:
+            list: 検出された日付の異なる形式のリスト
+        """
+        date_formats = []
+        
+        # YYYY年MM月DD日 形式
+        standard_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+        if standard_match:
+            year = standard_match.group(1)
+            month = standard_match.group(2).zfill(2)
+            day = standard_match.group(3).zfill(2)
+            date_formats.append(f"{year}{month}{day}")
+            date_formats.append(f"{year}-{month}-{day}")
+            date_formats.append(f"{year}/{month}/{day}")
+            # 元の形式も追加
+            date_formats.append(f"{year}年{month}月{day}日")
+        
+        # YYYY/MM/DD 形式
+        slash_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', query)
+        if slash_match and not standard_match:
+            year = slash_match.group(1)
+            month = slash_match.group(2).zfill(2)
+            day = slash_match.group(3).zfill(2)
+            date_formats.append(f"{year}{month}{day}")
+            date_formats.append(f"{year}-{month}-{day}")
+            date_formats.append(f"{year}/{month}/{day}")
+            date_formats.append(f"{year}年{month}月{day}日")
+        
+        # MM/DD 形式 (当年と仮定)
+        short_date_match = re.search(r'(?<!\d)(\d{1,2})[/\-](\d{1,2})(?!\d)', query)
+        if short_date_match and not standard_match and not slash_match:
+            year = str(datetime.now().year)
+            month = short_date_match.group(1).zfill(2)
+            day = short_date_match.group(2).zfill(2)
+            date_formats.append(f"{year}{month}{day}")
+            date_formats.append(f"{year}-{month}-{day}")
+            date_formats.append(f"{year}/{month}/{day}")
+        
+        # 「今日」「昨日」などの相対日付
+        today = datetime.now()
+        if '今日' in query or '本日' in query:
+            date = today
+            date_formats.append(date.strftime('%Y%m%d'))
+            date_formats.append(date.strftime('%Y-%m-%d'))
+            date_formats.append(date.strftime('%Y/%m/%d'))
+            date_formats.append(date.strftime('%Y年%m月%d日'))
+        
+        if '昨日' in query:
+            date = today - timedelta(days=1)
+            date_formats.append(date.strftime('%Y%m%d'))
+            date_formats.append(date.strftime('%Y-%m-%d'))
+            date_formats.append(date.strftime('%Y/%m/%d'))
+            date_formats.append(date.strftime('%Y年%m月%d日'))
+        
+        if '一昨日' in query:
+            date = today - timedelta(days=2)
+            date_formats.append(date.strftime('%Y%m%d'))
+            date_formats.append(date.strftime('%Y-%m-%d'))
+            date_formats.append(date.strftime('%Y/%m/%d'))
+            date_formats.append(date.strftime('%Y年%m月%d日'))
+        
+        # 重複を削除
+        return list(set(date_formats))
+
     def search_files(self, keywords, file_types=None, max_results=None, use_cache=True):
         """
         OneDrive内のファイルをキーワードで検索
@@ -102,21 +173,20 @@ class OneDriveSearch:
         date_keywords = []
         search_terms = []
 
+        # クエリ文字列を再構築
+        query_text = ' '.join(keywords) if isinstance(keywords, list) else keywords
+
+        # 拡張日付検出
+        date_formats = self.enhance_date_detection(query_text)
+        if date_formats:
+            date_keywords.extend(date_formats)
+            logger.info(f"検出された日付形式: {date_formats}")
+
         for k in keywords:
-            # 日付形式（YYYY年MM月DD日）を抽出
-            if re.search(r'\d{4}年\d{1,2}月\d{1,2}日', k):
-                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', k)
-                if date_match:
-                    year = date_match.group(1)
-                    month = date_match.group(2).zfill(2)  # 1桁の月を2桁に
-                    day = date_match.group(3).zfill(2)    # 1桁の日を2桁に
-                    date_pattern = f"{year}{month}{day}"
-                    date_pattern2 = f"{year}-{month}-{day}"
-                    date_pattern3 = f"{year}/{month}/{day}"
-                    date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
-            else:
-                # 日本語検索キーワードは短くして検索精度を上げる
-                if len(k) > 2 and re.search(r'[ぁ-んァ-ン一-龥]', k):
+            # 日本語検索キーワードは短くして検索精度を上げる
+            if len(k) > 2 and re.search(r'[ぁ-んァ-ン一-龥]', k):
+                # 日付関連のキーワードを除外
+                if not any(date in k for date in ['今日', '昨日', '一昨日', '年', '月', '日']):
                     search_terms.append(k)
 
         # 少なくとも日付キーワードは追加
@@ -130,6 +200,16 @@ class OneDriveSearch:
         # 最低1つのキーワードを確保
         if not search_terms and isinstance(keywords, str) and keywords:
             search_terms = [keywords]
+
+        # 日報、週報、月報など特定文書タイプの重要キーワード
+        report_keywords = ['日報', '週報', '月報', 'report', 'daily', 'weekly', 'monthly']
+        has_report_keyword = any(rk in query_text.lower() for rk in report_keywords)
+        
+        if has_report_keyword:
+            # 日報関連のキーワードを追加
+            for report_key in report_keywords:
+                if report_key in query_text.lower() and report_key not in search_terms:
+                    search_terms.append(report_key)
 
         logger.info(f"OneDrive検索を実行: キーワード={search_terms}, ファイルタイプ={file_types}")
 
@@ -201,7 +281,7 @@ class OneDriveSearch:
             $results = @()
             try {{
                 $files = Get-ChildItem -Path "{search_path}" -Recurse -File -ErrorAction SilentlyContinue
-                $filtered = $files | Where-Object {{ {full_condition} }} | Select-Object -First {max_results}
+                $filtered = $files | Where-Object {{ {full_condition} }} | Select-Object -First {max_results + 10}
                 foreach ($file in $filtered) {{
                     $results += @{{
                         path = $file.FullName
@@ -277,6 +357,12 @@ class OneDriveSearch:
                     logger.error(f"JSON解析エラー: {e}")
                     logger.debug(f"解析できないJSON: {stdout_text[:200]}...")
 
+            # 関連性によるランク付け
+            results = self.rank_search_results(results, search_terms)
+
+            # 最大結果数に制限
+            results = results[:max_results]
+
             # 結果のフォーマットと表示
             logger.info(f"検索結果: {len(results)}件")
             for i, result in enumerate(results[:3]):  # 最初の3件のみログ表示
@@ -294,13 +380,147 @@ class OneDriveSearch:
             logger.error(f"OneDrive検索中にエラーが発生しました: {str(e)}")
             logger.error(f"詳細: {str(e.__class__.__name__)}")
             return []
+            
+    def rank_search_results(self, results, keywords):
+        """
+        検索結果をキーワードとの関連性でランク付け
+        
+        Args:
+            results: 検索結果リスト
+            keywords: 検索キーワードリスト
+            
+        Returns:
+            ランク付けされた検索結果リスト
+        """
+        ranked_results = []
+        
+        for result in results:
+            score = 0
+            path = result.get('path', '').lower()
+            name = result.get('name', '').lower()
+            
+            # ファイル名中のキーワードスコア
+            for keyword in keywords:
+                keyword_lower = keyword.lower()
+                if keyword_lower in name:
+                    score += 10  # ファイル名に直接含まれる場合は高スコア
+                    # 完全一致の場合はさらに高スコア
+                    if name == keyword_lower or f"{keyword_lower}.pdf" == name or f"{keyword_lower}.docx" == name:
+                        score += 20
+                
+                # パス中のキーワードスコア（小さめ）
+                if keyword_lower in path:
+                    score += 3
+            
+            # パス中の関連ディレクトリスコア
+            if '日報' in path:
+                score += 5
+            if 'report' in path:
+                score += 5
+            if '文書' in path or 'documents' in path:
+                score += 3
+                
+            # 最終更新日時の新しさでスコア調整
+            try:
+                modified = result.get('modified', '')
+                if modified:
+                    mod_date = datetime.strptime(modified, '%Y-%m-%d %H:%M:%S')
+                    days_old = (datetime.now() - mod_date).days
+                    if days_old < 30:
+                        score += max(0, 5 - days_old//7)  # 新しいほど高スコア
+            except Exception:
+                pass
+                
+            # 拡張子によるスコア調整
+            if name.endswith('.pdf'):
+                score += 3
+            elif name.endswith('.docx'):
+                score += 2
+            elif name.endswith('.xlsx'):
+                score += 2
+            elif name.endswith('.txt'):
+                score += 1
+                
+            ranked_results.append((score, result))
+        
+        # スコア順にソート（降順）
+        ranked_results.sort(reverse=True, key=lambda x: x[0])
+        return [item[1] for item in ranked_results]
 
-    def read_file_content(self, file_path):
+    def optimize_file_content(self, content, query, max_chars=4000):
+        """
+        ファイル内容をクエリに最も関連する部分に絞り込む
+        
+        Args:
+            content: ファイル内容
+            query: 検索クエリ
+            max_chars: 最大文字数
+            
+        Returns:
+            最適化されたファイル内容
+        """
+        # クエリからキーワードを抽出
+        keywords = [k for k in query.split() 
+                    if len(k) > 1 and k.lower() not in ["について", "とは", "の", "を", "に", "は", "で", "が"]]
+        
+        # 内容が短い場合はそのまま返す
+        if len(content) <= max_chars:
+            return content
+            
+        # 段落分割
+        paragraphs = re.split(r'\n\s*\n', content)
+        
+        # 各段落のスコア付け
+        scored_paragraphs = []
+        for p in paragraphs:
+            if not p.strip():
+                continue
+                
+            score = 0
+            for keyword in keywords:
+                if keyword.lower() in p.lower():
+                    score += p.lower().count(keyword.lower())
+                    
+            # 日付形式を含む段落を優先
+            if re.search(r'\d{4}[-/年]\d{1,2}[-/月]\d{1,2}', p):
+                score += 5
+                
+            scored_paragraphs.append((score, p))
+        
+        # スコア順にソート
+        scored_paragraphs.sort(reverse=True, key=lambda x: x[0])
+        
+        # 最も関連性の高い段落を結合（上限まで）
+        result = ""
+        char_count = 0
+        
+        # スコアが0のものは除外
+        filtered_paragraphs = [p for s, p in scored_paragraphs if s > 0]
+        
+        # スコアが高いものが見つからない場合は、最初の部分を返す
+        if not filtered_paragraphs:
+            return content[:max_chars]
+        
+        for score, p in scored_paragraphs:
+            if score == 0 and char_count > max_chars // 2:
+                # スコアが0で、すでに十分な内容がある場合はスキップ
+                continue
+                
+            if char_count + len(p) + 2 > max_chars:
+                break
+                
+            result += p + "\n\n"
+            char_count += len(p) + 2
+        
+        return result
+
+    def read_file_content(self, file_path, query=None):
         """
         ファイルの内容を読み込む
 
         Args:
             file_path: 読み込むファイルパス
+            query: 検索クエリ（内容の最適化に使用）
 
         Returns:
             ファイルの内容（文字列）
@@ -322,6 +542,10 @@ class OneDriveSearch:
                         with open(file_path, 'r', encoding=encoding, errors='replace') as f:
                             content = f.read()
                             logger.info(f"テキストファイルとして読み込みました ({encoding}): {file_path}")
+                            
+                            # 検索クエリがある場合は内容を最適化
+                            if query:
+                                return self.optimize_file_content(content, query)
                             return content
                     except UnicodeDecodeError:
                         continue
@@ -330,6 +554,10 @@ class OneDriveSearch:
                 with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                     content = f.read()
                     logger.warning(f"代替エンコーディングで読み込みました: {file_path}")
+                    
+                    # 検索クエリがある場合は内容を最適化
+                    if query:
+                        return self.optimize_file_content(content, query)
                     return content
             else:
                 # バイナリファイルの場合はPowerShellを使用して内容を抽出
@@ -421,30 +649,7 @@ class OneDriveSearch:
         }}
         """
         return self._extract_file_content_helper(file_path, cmd)
-
-    def _extract_word_content(self, file_path):
-        """
-        Wordファイル(docx)からテキストを抽出する
-        """
-        cmd = f"""
-        try {{
-            # ファイルの存在確認
-            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "Word文書名: {os.path.basename(file_path)}"
-                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                "----------------------------------------"
-                # Wordアプリケーションを使わず、基本情報のみ表示
-                "このWord文書からのテキスト抽出はサポートされていません"
-            }} else {{
-                "ファイルが見つかりません: {file_path}"
-            }}
-        }} catch {{
-            "エラーが発生しました: $_"
-        }}
-        """
-        return self._extract_file_content_helper(file_path, cmd)
-
+        
     def _extract_excel_content(self, file_path):
         """
         Excelファイル(xlsx)から基本情報を抽出する
@@ -505,17 +710,18 @@ class OneDriveSearch:
         if max_files is None:
             max_files = self.max_results
 
-        # 日付を抽出（YYYY年MM月DD日）
-        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+        # 拡張日付検出
+        date_formats = self.enhance_date_detection(query)
         date_str = None
-
-        if date_match:
-            year = date_match.group(1)
-            month = date_match.group(2).zfill(2)
-            day = date_match.group(3).zfill(2)
-            date_str = f"{year}年{month}月{day}日"
-            date_pattern = f"{year}{month}{day}"
-            logger.info(f"日付指定を検出: {date_str} (パターン: {date_pattern})")
+        if date_formats:
+            # 年月日形式を優先
+            for fmt in date_formats:
+                if "年" in fmt:
+                    date_str = fmt
+                    break
+            if not date_str:
+                date_str = date_formats[0]
+            logger.info(f"日付指定を検出: {date_str}")
 
         # 検索クエリからストップワードを除去
         stop_words = ["について", "とは", "の", "を", "に", "は", "で", "が", "と", "から", "へ", "より", 
@@ -540,6 +746,12 @@ class OneDriveSearch:
                     keywords.append(clean_word)
                 else:
                     pass
+
+        # 日報キーワードの追加
+        report_keywords = ['日報', '週報', '月報', '業務報告']
+        for report_word in report_keywords:
+            if report_word in query and report_word not in keywords:
+                keywords.append(report_word)
 
         # キーワードが少なすぎる場合のバックアップとして日報関連の単語を追加
         if len(keywords) < 2:
@@ -572,15 +784,15 @@ class OneDriveSearch:
             modified = result.get('modified', '不明')
 
             # ファイルの内容を読み込み
-            content = self.read_file_content(file_path)
+            content = self.read_file_content(file_path, query)
 
-            # コンテンツのプレビューを追加（文字数制限あり）
-            preview_length = min(2000, len(content))  # 1ファイルあたり最大2000文字
-            preview = content[:preview_length]
+            # コンテンツの最適化（クエリに関連する部分を優先的に抽出）
+            if len(content) > 2000:
+                content = self.optimize_file_content(content, query, 2000)
 
             file_content = f"=== ファイル {i+1}: {file_name} ===\n"
             file_content += f"更新日時: {modified}\n"
-            file_content += f"{preview}\n\n"
+            file_content += f"{content}\n\n"
 
             # 最大文字数をチェック
             if total_chars + len(file_content) > max_chars:
@@ -616,3 +828,26 @@ if __name__ == "__main__":
     content = onedrive_search.get_relevant_content(test_query)
 
     print(f"検索結果: {content[:500]}...")  # 最初の500文字のみ表示
+
+    def _extract_word_content(self, file_path):
+        """
+        Wordファイル(docx)からテキストを抽出する
+        """
+        cmd = f"""
+        try {{
+            # ファイルの存在確認
+            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
+                "Word文書名: {os.path.basename(file_path)}"
+                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
+                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
+                "----------------------------------------"
+                # Wordアプリケーションを使わず、基本情報のみ表示
+                "このWord文書からのテキスト抽出はサポートされていません"
+            }} else {{
+                "ファイルが見つかりません: {file_path}"
+            }}
+        }} catch {{
+            "エラーが発生しました: $_"
+        }}
+        """
+        return self._extract_file_content_helper(file_path, cmd)
