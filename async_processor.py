@@ -1,4 +1,4 @@
-# async_processor.py - 改善された非同期処理機能
+# async_processor.py - OneDrive検索機能を組み込んだ非同期処理
 import logging
 import traceback
 from ollama_client import generate_ollama_response
@@ -42,7 +42,7 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
                 logger.info("OneDriveに関する質問のため、検索をスキップします")
 
         # Ollamaで回答を生成（OneDrive検索結果を含む）
-        response, search_results = generate_ollama_response(
+        response = generate_ollama_response(
             query_text, 
             ollama_url, 
             ollama_model, 
@@ -54,7 +54,7 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
         if teams_webhook:
             # TEAMS_WORKFLOW_URLを使用して直接Teamsに送信
             logger.info("Teamsに直接応答を送信します")
-            result = teams_webhook.send_ollama_response(clean_query, response, search_results, search_path)
+            result = teams_webhook.send_ollama_response(clean_query, response, None, search_path)
             logger.info(f"Teams送信結果: {result}")
 
             # 送信に失敗した場合の処理
