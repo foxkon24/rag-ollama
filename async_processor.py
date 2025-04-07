@@ -1,6 +1,7 @@
-# async_processor.py - OneDrive検索機能を組み込んだ非同期処理
+# async_processor.py - OneDrive検索機能を組み込んだ非同期処理（改善版）
 import logging
 import traceback
+import re
 from ollama_client import generate_ollama_response
 
 logger = logging.getLogger(__name__)
@@ -8,7 +9,7 @@ logger.setLevel(logging.DEBUG)  # 詳細なログを有効化
 
 def process_query_async(query_text, original_data, ollama_url, ollama_model, ollama_timeout, teams_webhook, onedrive_search=None):
     """
-    クエリを非同期で処理し、結果をTeamsに通知する（OneDrive検索機能付き）
+    クエリを非同期で処理し、結果をTeamsに通知する（OneDrive検索機能付き・改善版）
 
     Args:
         query_text: 処理するクエリテキスト
@@ -51,10 +52,30 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
         )
         logger.info(f"非同期処理による応答生成完了: {response[:100]}...")
 
+        # 検索結果の件数を抽出
+        search_result_count = 0
+        result_count_match = re.search(r'【検索結果: (\d+)件のファイルが見つかりました】', response)
+        if result_count_match:
+            search_result_count = int(result_count_match.group(1))
+            logger.info(f"検索結果: {search_result_count}件のファイルが見つかりました")
+        
+        # 検索結果の件数情報をログに記録
+        if search_result_count > 0:
+            logger.info(f"検索結果あり: {search_result_count}件")
+        else:
+            logger.info("検索結果なし")
+
         if teams_webhook:
             # TEAMS_WORKFLOW_URLを使用して直接Teamsに送信
             logger.info("Teamsに直接応答を送信します")
-            result = teams_webhook.send_ollama_response(clean_query, response, None, search_path)
+            
+            # 会話データを追加（検索結果の情報を含める）
+            conversation_data = {
+                "search_result_count": search_result_count,
+                "query": clean_query
+            }
+            
+            result = teams_webhook.send_ollama_response(clean_query, response, conversation_data, search_path)
             logger.info(f"Teams送信結果: {result}")
 
             # 送信に失敗した場合の処理

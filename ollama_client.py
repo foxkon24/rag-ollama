@@ -1,16 +1,15 @@
-# ollama_client.py - Ollamaとの通信と応答生成（日本語クエリ&コンテキスト改善版）
+# ollama_client.py - Ollamaとの通信と応答生成（改善版）
 import logging
 import requests
 import traceback
 import re
 import os
-import json
 
 logger = logging.getLogger(__name__)
 
 def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, onedrive_search=None):
     """
-    Ollamaを使用して回答を生成する（日本語クエリ&コンテキスト改善版）
+    Ollamaを使用して回答を生成する（改善版）
 
     Args:
         query: ユーザーからの質問
@@ -32,8 +31,7 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
         # OneDrive検索が有効かつクエリがある場合は関連情報を検索
         onedrive_context = ""
         search_path = ""
-        file_extraction_status = "未検索"  # ファイル内容抽出状態を追跡
-        
+        search_result_count = 0
         if onedrive_search and clean_query:
             # 検索ディレクトリのパスを取得（短縮表示用）
             search_path = onedrive_search.base_directory
@@ -47,26 +45,17 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
             try:
                 relevant_content = onedrive_search.get_relevant_content(clean_query)
                 
-                # ファイル内容が正しく抽出できたかチェック
-                if relevant_content and "件の関連ファイルが見つかりました" in relevant_content:
-                    # ファイル抽出の問題をチェック
-                    has_extraction_issues = any([
-                        "サポートされていません" in relevant_content,
-                        "抽出できませんでした" in relevant_content,
-                        "内容の抽出に制限があります" in relevant_content
-                    ])
-                    
-                    if has_extraction_issues:
-                        file_extraction_status = "一部抽出"
-                        logger.warning("一部のファイルで内容抽出に問題がありました")
-                    else:
-                        file_extraction_status = "抽出成功"
-                        logger.info("ファイル内容の抽出に成功しました")
-                        
+                # 検索結果の件数を抽出
+                result_count_match = re.search(r'---\s+(\d+)件の関連ファイルが見つかりました', relevant_content)
+                if result_count_match:
+                    search_result_count = int(result_count_match.group(1))
+                
+                # 検索結果が見つかったかどうかを判定する条件を改善
+                # 「件の関連ファイルが見つかりました」または「=== ファイル」の文字列で判定
+                if search_result_count > 0 or "=== ファイル" in relevant_content:
                     onedrive_context = f"\n\n参考資料（OneDriveから取得 - {short_path}）:\n{relevant_content}"
-                    logger.info(f"OneDriveから関連情報を取得: {len(onedrive_context)}文字")
+                    logger.info(f"OneDriveから関連情報を取得: {len(onedrive_context)}文字, {search_result_count}件のファイル")
                 else:
-                    file_extraction_status = "ファイル未検出"
                     # ファイルが見つからない場合は見つからないことを明示
                     if has_date:
                         # 日付から数字だけを抽出して表示
@@ -82,15 +71,12 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                     
                     logger.info("関連情報は見つかりませんでした")
             except Exception as e:
-                file_extraction_status = "エラー"
                 logger.error(f"OneDrive検索中にエラーが発生: {str(e)}")
+                logger.error(traceback.format_exc())
                 onedrive_context = f"\n\n注意: OneDriveでの検索中にエラーが発生しました。検索パス: {short_path}"
 
         # Ollamaとは何かを質問されているかを確認
         is_about_ollama = "ollama" in clean_query.lower() and ("とは" in clean_query or "什么" in clean_query or "what" in clean_query.lower())
-
-        # 日報に関する質問かどうかをチェック
-        is_about_nippo = "日報" in clean_query or "報告" in clean_query
 
         # プロンプトの構築（OneDriveコンテキストを含む）
         if is_about_ollama:
@@ -107,25 +93,23 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 - APIを通じて他のアプリケーションから利用できる{onedrive_context}"""
         else:
             # 日報に関する質問の特別処理
-            if is_about_nippo and file_extraction_status == "抽出成功":
+            if "日報" in clean_query and search_result_count > 0:
                 prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
 {onedrive_context}
 
-上記の参考資料を基に具体的に回答してください。特に日付や内容を明確に述べてください。
-参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください。"""
-            elif is_about_nippo and file_extraction_status == "一部抽出":
-                prompt = f"""以下の質問に日本語で丁寧に回答してください。
+上記の参考資料を基に日報の内容を詳細かつ具体的に要約して回答してください。以下の点を含めてください：
+1. 日報に記載されている主な活動内容や進捗状況を具体的に説明
+2. 会議や打ち合わせがあれば、その目的と主な議題・決定事項
+3. 重要なタスクや課題、解決策についての情報
+4. 記載されている日付、時間、関係者、部署名などの詳細情報
+5. 数値データや成果物があれば具体的に言及
 
-質問: {clean_query}
-
-{onedrive_context}
-
-上記の参考資料を基に回答してください。一部のファイル形式（PDF、Excel、Word、PowerPoint）からの内容抽出には技術的制限があるため、抽出できた情報のみを使って回答します。
-参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください。"""
-            elif is_about_nippo and file_extraction_status == "ファイル未検出":
+参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください。
+読みやすく構造化された形式で回答を提供してください。"""
+            elif "日報" in clean_query and not search_result_count > 0:
                 # 日報が見つからない場合
                 date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
                 if date_match:
@@ -154,20 +138,23 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 ご質問の日報データは検索ディレクトリ（{short_path}）から見つかりませんでした。具体的な日付（例：2024年10月26日）を指定すると検索できる可能性があります。
 日報検索には、年月日を含めた形で質問していただくとより正確に検索できます。"""
             else:
-                # 通常の質問の処理
-                # OneDriveコンテキストを含むプロンプト
-                if onedrive_context:
+                # 一般的な質問と検索結果がある場合
+                if search_result_count > 0:
                     prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
 {onedrive_context}
 
-上記の参考資料を基に質問に回答してください。参考資料に関連情報がない場合は、あなたの知識を使って回答してください。"""
+上記の参考資料を基に詳細かつ具体的に回答してください。以下の点に注意してください：
+1. 参考資料の内容を要約して説明してください
+2. 重要なポイント、データ、情報を具体的に含めてください
+3. 関連する日付、数値、名前などの詳細情報も含めてください
+4. 参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください
+5. 読みやすく構造化された形式で回答を提供してください"""
                 else:
+                    # OneDriveコンテキストがない場合は単純なプロンプト
                     prompt = clean_query
-
-        logger.info(f"生成したプロンプト（最初の200文字）: {prompt[:200]}...")
 
         # Ollamaへのリクエストを構築（パラメータを調整）
         payload = {
@@ -175,7 +162,7 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
             "prompt": prompt,
             "stream": False,
             "options": {
-                "num_predict": 2048,      # 生成するトークン数を増加（長めの回答）
+                "num_predict": 1024,      # 生成するトークン数を増加（長めの回答）
                 "temperature": 0.7,       # バランスの取れた温度
                 "top_k": 40,              # 効率化のため選択肢を制限
                 "top_p": 0.9,             # 確率分布を制限して効率化
@@ -194,34 +181,36 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 
             if response.status_code == 200:
                 result = response.json()
-                logger.info(f"Ollama応答JSON: {str(result)[:200]}...")  # 最初の200文字のみログに表示
+                logger.info(f"Ollama応答JSON: {result}")
 
                 generated_text = result.get('response', '申し訳ありませんが、回答を生成できませんでした。')
-                logger.info(f"生成されたテキスト（最初の100文字）: {generated_text[:100]}...")
+                logger.info(f"生成されたテキスト: {generated_text[:100]}...")
 
                 # レスポンスが空でないことを確認
                 if not generated_text.strip():
                     generated_text = "申し訳ありませんが、有効な回答を生成できませんでした。"
 
-                # ファイル抽出状態に基づいて、必要に応じて回答に注釈を追加
-                if is_about_nippo and file_extraction_status == "一部抽出":
-                    generated_text += "\n\n注: 一部のOfficeファイルやPDFからは技術的制限により完全なテキスト抽出ができていない可能性があります。"
+                # 検索結果の情報を追加
+                if onedrive_search and search_result_count > 0:
+                    # generated_textの先頭に検索結果の情報を追加
+                    search_info = f"【検索結果: {search_result_count}件のファイルが見つかりました】\n\n"
+                    generated_text = search_info + generated_text
 
                 logger.info("回答が正常に生成されました")
                 return generated_text
 
             else:
                 # エラーが発生した場合のフォールバック応答
-                return get_fallback_response(clean_query, is_about_ollama, search_path)
+                return get_fallback_response(clean_query, is_about_ollama, search_path, search_result_count)
 
         except requests.exceptions.Timeout:
             logger.error("Ollamaリクエストがタイムアウトしました")
             # タイムアウト時のフォールバック応答
-            return get_fallback_response(clean_query, is_about_ollama, search_path)
+            return get_fallback_response(clean_query, is_about_ollama, search_path, search_result_count)
 
         except requests.exceptions.ConnectionError:
             logger.error("Ollamaサーバーに接続できませんでした")
-            return get_fallback_response(clean_query, is_about_ollama, search_path)
+            return get_fallback_response(clean_query, is_about_ollama, search_path, search_result_count)
 
     except Exception as e:
         logger.error(f"回答生成中にエラーが発生しました: {str(e)}")
@@ -272,7 +261,7 @@ def get_shortened_path(path):
     
     return path
 
-def get_fallback_response(query, is_about_ollama=False, search_path=""):
+def get_fallback_response(query, is_about_ollama=False, search_path="", search_result_count=0):
     """
     タイムアウトやエラー時に使用するフォールバック応答を返す
 
@@ -280,11 +269,21 @@ def get_fallback_response(query, is_about_ollama=False, search_path=""):
         query: ユーザーの質問
         is_about_ollama: Ollamaに関する質問かどうか
         search_path: 検索したパス
+        search_result_count: 検索結果の件数
 
     Returns:
         フォールバック応答
     """
     short_path = get_shortened_path(search_path)
+    
+    # 検索結果があるが応答生成に失敗した場合
+    if search_result_count > 0:
+        return f"""【検索結果: {search_result_count}件のファイルが見つかりました】
+
+申し訳ありませんが、Ollamaサーバーからの応答に問題が発生しました。検索は成功しましたが、回答の生成に失敗しました。
+時間をおいて再度お試しいただくか、別の質問方法をお試しください。
+
+検索ディレクトリ: {short_path}"""
     
     if is_about_ollama:
         return """Ollamaは、大規模言語モデル（LLM）をローカル環境で実行するためのオープンソースフレームワークです。
