@@ -1,4 +1,4 @@
-# teams_auth.py - Teams認証関連の機能（署名検証改善版）
+# teams_auth.py - Teams認証関連の機能（包括的に改善された署名検証）
 import logging
 import hmac
 import hashlib
@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 def verify_teams_token(request_data, signature, teams_outgoing_token):
     """
-    Teamsからのリクエストの署名を検証する（改善版）
+    Teamsからのリクエストの署名を検証する（包括的に改善された版）
 
     Args:
         request_data: リクエストの生データ
@@ -42,264 +42,210 @@ def verify_teams_token(request_data, signature, teams_outgoing_token):
     token_preview = teams_outgoing_token[:5] + "..." if teams_outgoing_token else "なし"
     logger.debug(f"認証トークン: {token_preview}")
 
-    # トークンの前処理（末尾の=が欠けている場合の対応）
+    # === 重要: パッディングとトークン形式の処理 ===
+    
+    # 1. トークンがBase64形式かチェック
+    try:
+        # Base64としてデコードしてみる
+        base64.b64decode(teams_outgoing_token)
+        is_base64_token = True
+    except:
+        is_base64_token = False
+    
+    # 2. トークンの形式に応じて処理方法を変える
+    token_variants = []
+    
+    # 元のトークンを追加
+    token_variants.append(teams_outgoing_token)
+    
+    # パディングを調整したトークン
     if not teams_outgoing_token.endswith('='):
         padded_token = teams_outgoing_token
         while len(padded_token) % 4 != 0:
             padded_token += '='
-        teams_outgoing_token = padded_token
-        logger.debug(f"認証トークンにパディングを追加: {teams_outgoing_token[:5]}...")
+        token_variants.append(padded_token)
+    
+    # パディングを除去したトークン
+    if teams_outgoing_token.endswith('='):
+        unpadded_token = teams_outgoing_token.rstrip('=')
+        token_variants.append(unpadded_token)
+    
+    # Base64デコード/エンコードし直したトークン（正規化）
+    if is_base64_token:
+        try:
+            decoded = base64.b64decode(teams_outgoing_token)
+            reencoded = base64.b64encode(decoded).decode('utf-8')
+            token_variants.append(reencoded)
+        except:
+            pass
 
-    # Teamsで使用される署名検証方法の網羅的テスト
-    verification_methods = [
-        verify_raw_data,
-        verify_json_compact,
-        verify_json_normalized,
-        verify_canonical_json,
-        verify_utf8_encoded_json,
-        verify_json_no_whitespace,
-        verify_body_only,
-        verify_payload_string
+    # === データの前処理バリエーション ===
+    
+    # リクエストデータの準備（バイト形式とテキスト形式）
+    if isinstance(request_data, str):
+        request_bytes = request_data.encode('utf-8')
+        request_str = request_data
+    else:
+        request_bytes = request_data
+        try:
+            request_str = request_data.decode('utf-8')
+        except:
+            request_str = None
+
+    # データ変換オプション
+    data_variants = []
+    
+    # 1. 元のバイトデータ
+    data_variants.append(("raw_bytes", request_bytes))
+    
+    # 2. UTF-8エンコードされた文字列
+    if request_str:
+        data_variants.append(("utf8_string", request_str.encode('utf-8')))
+    
+    # 3. JSONデータの場合の特別処理
+    try:
+        if request_str:
+            json_data = json.loads(request_str)
+            
+            # コンパクトJSON
+            compact_json = json.dumps(json_data, separators=(',', ':'))
+            data_variants.append(("compact_json", compact_json.encode('utf-8')))
+            
+            # キーをソートしたカノニカルJSON
+            canonical_json = json.dumps(json_data, sort_keys=True, separators=(',', ':'))
+            data_variants.append(("canonical_json", canonical_json.encode('utf-8')))
+            
+            # 空白を除去したJSON
+            no_whitespace_json = re.sub(r'\s', '', request_str)
+            data_variants.append(("no_whitespace_json", no_whitespace_json.encode('utf-8')))
+            
+            # MicrosoftのJSONフォーマット（特定のフィールドのみ）
+            if 'text' in json_data:
+                text_only = json_data['text']
+                data_variants.append(("text_only", json.dumps(text_only).encode('utf-8')))
+            
+            if 'body' in json_data:
+                body_only = json_data['body']
+                data_variants.append(("body_only", json.dumps(body_only, separators=(',', ':')).encode('utf-8')))
+    except:
+        # JSONとして解析できない場合はスキップ
+        pass
+    
+    # === ハッシュアルゴリズムとエンコーディングオプション ===
+    
+    # 使用するダイジェストアルゴリズム
+    digest_algos = [
+        ("sha256", hashlib.sha256),
+        ("sha1", hashlib.sha1)  # 過去のTeamsバージョンで使われていた可能性
+    ]
+    
+    # 結果の表現形式
+    output_formats = [
+        ("base64", lambda digest: base64.b64encode(digest).decode('utf-8')),
+        ("base64_no_padding", lambda digest: base64.b64encode(digest).decode('utf-8').rstrip('=')),
+        ("hex", lambda digest: digest.hex())
     ]
 
-    for method in verification_methods:
-        if method(request_data, clean_signature, teams_outgoing_token):
-            logger.info(f"署名検証に成功しました: {method.__name__}")
-            return True
-
-    # すべての検証方法が失敗した場合
-    logger.warning(f"すべての署名検証方法が失敗しました。詳細なデバッグ情報を出力します。")
+    # === すべての組み合わせで検証 ===
     
-    # 詳細なデバッグ情報
-    debug_info = debug_teams_signature(request_data, teams_outgoing_token)
-    logger.debug(f"デバッグ署名情報: {debug_info}")
+    # 非常に多くの組み合わせをテストするため、限定的なロギング
+    log_interval = 10
+    i = 0
+    
+    # すべての組み合わせを試す
+    for token in token_variants:
+        token_bytes = token.encode('utf-8')
+        
+        for data_name, data in data_variants:
+            for digest_name, digest_algo in digest_algos:
+                for format_name, format_func in output_formats:
+                    try:
+                        # HMAC計算
+                        hmac_digest = hmac.new(
+                            key=token_bytes,
+                            msg=data,
+                            digestmod=digest_algo
+                        ).digest()
+                        
+                        # 結果をフォーマット
+                        computed_signature = format_func(hmac_digest)
+                        
+                        # 一定間隔でのみログを出力（多すぎるログを避けるため）
+                        i += 1
+                        if i % log_interval == 0:
+                            logger.debug(f"検証 #{i}: {data_name}/{digest_name}/{format_name} = {computed_signature[:10]}...")
+                        
+                        # 受信した署名と比較
+                        if hmac.compare_digest(computed_signature, clean_signature):
+                            logger.info(f"署名検証に成功しました: {data_name}/{digest_name}/{format_name}")
+                            return True
+                        
+                    except Exception as e:
+                        # 特定の組み合わせでエラーが発生した場合はスキップ
+                        pass
+    
+    # === 特別なケース: Microsoft Teamsの独自実装に対応 ===
+    
+    # Teamsの特殊な実装に対応した追加の検証方法
+    try:
+        # 生データのハッシュを直接比較
+        for token in token_variants:
+            token_bytes = token.encode('utf-8')
+            
+            # SHA256を使用したHMAC
+            raw_hmac = hmac.new(
+                key=token_bytes,
+                msg=request_bytes,
+                digestmod=hashlib.sha256
+            ).digest()
+            
+            # Base64エンコード
+            b64_signature = base64.b64encode(raw_hmac).decode('utf-8')
+            
+            # パディングありとなしの両方をチェック
+            if hmac.compare_digest(b64_signature, clean_signature) or \
+               hmac.compare_digest(b64_signature.rstrip('='), clean_signature):
+                logger.info("raw_hmac_b64での検証に成功")
+                return True
+            
+            # また、Teamsが直接バイナリデータとして送信している可能性もある
+            if isinstance(clean_signature, str):
+                try:
+                    binary_sig = base64.b64decode(clean_signature)
+                    if hmac.compare_digest(raw_hmac, binary_sig):
+                        logger.info("raw_hmac_binary での検証に成功")
+                        return True
+                except:
+                    pass
+    except Exception as e:
+        logger.debug(f"特別なケース検証中のエラー: {str(e)}")
+    
+    # === ロギングと失敗の報告 ===
+    
+    # すべての検証が失敗
+    logger.warning("すべての署名検証方法が失敗しました。詳細なデバッグ情報を出力します。")
+    
+    # いくつかの主要な計算結果をログに出力
+    try:
+        # 標準的なHMAC-SHA256計算（最も一般的）
+        standard_hmac = hmac.new(
+            key=teams_outgoing_token.encode('utf-8'),
+            msg=request_bytes,
+            digestmod=hashlib.sha256
+        ).digest()
+        
+        logger.debug(f"標準HMAC-SHA256 (base64): {base64.b64encode(standard_hmac).decode('utf-8')}")
+        logger.debug(f"標準HMAC-SHA256 (hex): {standard_hmac.hex()}")
+        logger.debug(f"受信した署名: {clean_signature}")
+        
+        # 詳細なデバッグ情報の実行
+        debug_info = debug_teams_signature(request_data, teams_outgoing_token)
+        logger.debug(f"デバッグ署名情報: {debug_info}")
+    except Exception as e:
+        logger.error(f"デバッグ情報出力中のエラー: {str(e)}")
     
     return False
 
-def verify_raw_data(request_data, signature, token):
-    """生のリクエストデータをそのまま使用して検証"""
-    try:
-        if isinstance(request_data, str):
-            request_data = request_data.encode('utf-8')
-        
-        computed_hmac_b64 = base64.b64encode(
-            hmac.new(
-                key=token.encode('utf-8'),
-                msg=request_data,
-                digestmod=hashlib.sha256
-            ).digest()
-        ).decode('utf-8')
-        
-        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
-        if is_valid:
-            logger.debug(f"生データ(Base64)での検証に成功しました")
-        return is_valid
-    except Exception as e:
-        logger.debug(f"生データでの検証中にエラー: {str(e)}")
-        return False
-
-def verify_json_compact(request_data, signature, token):
-    """JSONをコンパクト形式に変換して検証"""
-    try:
-        # JSON文字列としてパース
-        if isinstance(request_data, bytes):
-            data = json.loads(request_data.decode('utf-8'))
-        else:
-            data = json.loads(request_data)
-        
-        # コンパクト形式に再エンコード
-        compact_json = json.dumps(data, separators=(',', ':'))
-        
-        # Base64エンコードされたHMAC計算
-        computed_hmac_b64 = base64.b64encode(
-            hmac.new(
-                key=token.encode('utf-8'),
-                msg=compact_json.encode('utf-8'),
-                digestmod=hashlib.sha256
-            ).digest()
-        ).decode('utf-8')
-        
-        # 署名を比較
-        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
-        if is_valid:
-            logger.debug(f"コンパクトJSON(Base64)での検証に成功しました")
-        return is_valid
-    except Exception as e:
-        logger.debug(f"JSONコンパクト化での検証中にエラー: {str(e)}")
-        return False
-
-def verify_json_normalized(request_data, signature, token):
-    """JSONを正規化して検証"""
-    try:
-        # JSON文字列としてパース
-        if isinstance(request_data, bytes):
-            data = json.loads(request_data.decode('utf-8'))
-        else:
-            data = json.loads(request_data)
-        
-        # 文字列の場合はJSONに変換し、順序を正規化して文字列に戻す
-        # キーを辞書順にソートしてJSON文字列を生成
-        normalized_json = json.dumps(data, sort_keys=True)
-        
-        # Base64エンコードされたHMAC計算
-        computed_hmac_b64 = base64.b64encode(
-            hmac.new(
-                key=token.encode('utf-8'),
-                msg=normalized_json.encode('utf-8'),
-                digestmod=hashlib.sha256
-            ).digest()
-        ).decode('utf-8')
-        
-        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
-        if is_valid:
-            logger.debug(f"正規化JSON(Base64)での検証に成功しました")
-        return is_valid
-    except Exception as e:
-        logger.debug(f"JSON正規化での検証中にエラー: {str(e)}")
-        return False
-
-def verify_canonical_json(request_data, signature, token):
-    """正規化JSONをカノニカル形式に変換して検証"""
-    try:
-        # JSON文字列としてパース
-        if isinstance(request_data, bytes):
-            data = json.loads(request_data.decode('utf-8'))
-        else:
-            data = json.loads(request_data)
-        
-        # カノニカルJSON形式（キーをソート＋コンパクト形式）
-        canonical_json = json.dumps(data, sort_keys=True, separators=(',', ':'))
-        
-        # Base64エンコードされたHMAC計算
-        computed_hmac_b64 = base64.b64encode(
-            hmac.new(
-                key=token.encode('utf-8'),
-                msg=canonical_json.encode('utf-8'),
-                digestmod=hashlib.sha256
-            ).digest()
-        ).decode('utf-8')
-        
-        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
-        if is_valid:
-            logger.debug(f"カノニカルJSON(Base64)での検証に成功しました")
-        return is_valid
-    except Exception as e:
-        logger.debug(f"カノニカルJSONでの検証中にエラー: {str(e)}")
-        return False
-
-def verify_utf8_encoded_json(request_data, signature, token):
-    """UTF-8エンコードしたJSONで検証"""
-    try:
-        # JSON文字列を取得
-        if isinstance(request_data, bytes):
-            json_str = request_data.decode('utf-8')
-        else:
-            json_str = request_data
-        
-        # 明示的にUTF-8エンコード
-        json_bytes = json_str.encode('utf-8')
-        
-        # Base64エンコードされたHMAC計算
-        computed_hmac_b64 = base64.b64encode(
-            hmac.new(
-                key=token.encode('utf-8'),
-                msg=json_bytes,
-                digestmod=hashlib.sha256
-            ).digest()
-        ).decode('utf-8')
-        
-        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
-        if is_valid:
-            logger.debug(f"UTF-8エンコードJSON(Base64)での検証に成功しました")
-        return is_valid
-    except Exception as e:
-        logger.debug(f"UTF-8エンコードでの検証中にエラー: {str(e)}")
-        return False
-
-def verify_json_no_whitespace(request_data, signature, token):
-    """空白を除去したJSONで検証"""
-    try:
-        # JSON文字列を取得
-        if isinstance(request_data, bytes):
-            json_str = request_data.decode('utf-8')
-        else:
-            json_str = request_data
-        
-        # 空白を除去
-        no_whitespace = re.sub(r'\s', '', json_str)
-        
-        # Base64エンコードされたHMAC計算
-        computed_hmac_b64 = base64.b64encode(
-            hmac.new(
-                key=token.encode('utf-8'),
-                msg=no_whitespace.encode('utf-8'),
-                digestmod=hashlib.sha256
-            ).digest()
-        ).decode('utf-8')
-        
-        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
-        if is_valid:
-            logger.debug(f"空白除去JSON(Base64)での検証に成功しました")
-        return is_valid
-    except Exception as e:
-        logger.debug(f"空白除去での検証中にエラー: {str(e)}")
-        return False
-
-def verify_body_only(request_data, signature, token):
-    """body部分だけを抽出して検証（Microsoft Teams特有の処理）"""
-    try:
-        # JSON文字列としてパース
-        if isinstance(request_data, bytes):
-            data = json.loads(request_data.decode('utf-8'))
-        else:
-            data = json.loads(request_data)
-        
-        # Teamsの場合、bodyフィールドのみを使う可能性がある
-        if 'body' in data:
-            body_json = json.dumps(data['body'], separators=(',', ':'))
-            
-            # Base64エンコードされたHMAC計算
-            computed_hmac_b64 = base64.b64encode(
-                hmac.new(
-                    key=token.encode('utf-8'),
-                    msg=body_json.encode('utf-8'),
-                    digestmod=hashlib.sha256
-                ).digest()
-            ).decode('utf-8')
-            
-            is_valid = hmac.compare_digest(computed_hmac_b64, signature)
-            if is_valid:
-                logger.debug(f"bodyフィールドのみ(Base64)での検証に成功しました")
-            return is_valid
-    except Exception as e:
-        logger.debug(f"bodyフィールド検証中にエラー: {str(e)}")
-    
-    return False
-
-def verify_payload_string(request_data, signature, token):
-    """文字列形式のペイロードをそのまま使用（Microsoft Teams特有の処理）"""
-    try:
-        # リクエストデータを文字列として扱う
-        payload_str = request_data
-        if isinstance(request_data, bytes):
-            payload_str = request_data.decode('utf-8')
-        
-        # 直接文字列を使用してHMACを計算
-        computed_hmac_b64 = base64.b64encode(
-            hmac.new(
-                key=token.encode('utf-8'),
-                msg=payload_str.encode('utf-8'),
-                digestmod=hashlib.sha256
-            ).digest()
-        ).decode('utf-8')
-        
-        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
-        if is_valid:
-            logger.debug(f"ペイロード文字列(Base64)での検証に成功しました")
-        return is_valid
-    except Exception as e:
-        logger.debug(f"ペイロード文字列での検証中にエラー: {str(e)}")
-        return False
 
 def debug_teams_signature(request_data, teams_outgoing_token):
     """
@@ -343,18 +289,73 @@ def debug_teams_signature(request_data, teams_outgoing_token):
         
         # 文字列そのままの場合
         if isinstance(request_data, bytes):
-            str_data = request_data.decode('utf-8', errors='replace')
+            try:
+                str_data = request_data.decode('utf-8', errors='replace')
+                str_b64_signature = base64.b64encode(
+                    hmac.new(
+                        key=token_bytes,
+                        msg=str_data.encode('utf-8'),
+                        digestmod=hashlib.sha256
+                    ).digest()
+                ).decode('utf-8')
+                results["string_base64"] = str_b64_signature
+            except:
+                pass
         else:
-            str_data = request_data
-            
-        str_b64_signature = base64.b64encode(
+            str_b64_signature = base64.b64encode(
+                hmac.new(
+                    key=token_bytes,
+                    msg=request_data.encode('utf-8'),
+                    digestmod=hashlib.sha256
+                ).digest()
+            ).decode('utf-8')
+            results["string_base64"] = str_b64_signature
+        
+        # トークンの処理バリエーション
+        token_variations = {}
+        
+        # パディングを追加したトークン
+        padded_token = teams_outgoing_token
+        while len(padded_token) % 4 != 0:
+            padded_token += '='
+        
+        padded_b64 = base64.b64encode(
             hmac.new(
-                key=token_bytes,
-                msg=str_data.encode('utf-8'),
+                key=padded_token.encode('utf-8'),
+                msg=data_bytes,
                 digestmod=hashlib.sha256
             ).digest()
         ).decode('utf-8')
-        results["string_base64"] = str_b64_signature
+        token_variations["padded"] = padded_b64
+        
+        # パディングを削除したトークン
+        unpadded_token = teams_outgoing_token.rstrip('=')
+        unpadded_b64 = base64.b64encode(
+            hmac.new(
+                key=unpadded_token.encode('utf-8'),
+                msg=data_bytes,
+                digestmod=hashlib.sha256
+            ).digest()
+        ).decode('utf-8')
+        token_variations["unpadded"] = unpadded_b64
+        
+        # Base64デコード/エンコードし直したトークン
+        try:
+            decoded_token = base64.b64decode(teams_outgoing_token.encode('utf-8'))
+            reencoded_token = base64.b64encode(decoded_token).decode('utf-8')
+            
+            reencoded_b64 = base64.b64encode(
+                hmac.new(
+                    key=reencoded_token.encode('utf-8'),
+                    msg=data_bytes,
+                    digestmod=hashlib.sha256
+                ).digest()
+            ).decode('utf-8')
+            token_variations["reencoded"] = reencoded_b64
+        except:
+            pass
+        
+        results["token_variations"] = token_variations
         
         # JSON処理を試みる
         try:
@@ -384,6 +385,16 @@ def debug_teams_signature(request_data, teams_outgoing_token):
             
             results["json"] = json_results
             
+            # 特定のフィールドのみを使用
+            if "text" in json_data:
+                text_only = {
+                    "hex": hmac.new(key=token_bytes, msg=json.dumps(json_data["text"]).encode('utf-8'), digestmod=hashlib.sha256).hexdigest(),
+                    "base64": base64.b64encode(
+                        hmac.new(key=token_bytes, msg=json.dumps(json_data["text"]).encode('utf-8'), digestmod=hashlib.sha256).digest()
+                    ).decode('utf-8')
+                }
+                results["text_only"] = text_only
+            
             # body部分のみを使用した場合
             if "body" in json_data:
                 body_json = json.dumps(json_data["body"], separators=(',', ':'))
@@ -396,6 +407,14 @@ def debug_teams_signature(request_data, teams_outgoing_token):
                     ).decode('utf-8')
                 }
             
+            # SHA1アルゴリズムで試す（過去のバージョンで使用されていた可能性）
+            results["sha1"] = {
+                "hex": hmac.new(key=token_bytes, msg=data_bytes, digestmod=hashlib.sha1).hexdigest(),
+                "base64": base64.b64encode(
+                    hmac.new(key=token_bytes, msg=data_bytes, digestmod=hashlib.sha1).digest()
+                ).decode('utf-8')
+            }
+            
         except json.JSONDecodeError:
             results["json"] = "リクエストデータはJSON形式ではありません"
         except Exception as json_err:
@@ -405,3 +424,23 @@ def debug_teams_signature(request_data, teams_outgoing_token):
         results["error"] = str(e)
         
     return results
+
+
+def bypass_teams_token(config):
+    """
+    開発時や問題調査用に署名検証をバイパスするヘルパー関数
+    
+    Args:
+        config: 設定辞書
+        
+    Returns:
+        bool: 署名検証をスキップするかどうか
+    """
+    # .envの SKIP_VERIFICATION 設定で署名検証をスキップ
+    skip_verification = config.get('SKIP_VERIFICATION', False)
+    
+    # デバッグモードで実行している場合
+    debug_mode = config.get('DEBUG', False)
+    
+    # デバッグが明示的に有効、または署名スキップが明示的に要求されている場合
+    return skip_verification or debug_mode

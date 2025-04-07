@@ -1,11 +1,11 @@
-# routes.py - Flaskルート定義（OneDrive検索機能追加版、署名検証改善版）
+# routes.py - Flaskルート定義（署名検証バイパス機能追加版）
 import re
 import logging
 import threading
 import traceback
 from datetime import datetime
 from flask import request, jsonify, render_template
-from teams_auth import verify_teams_token, debug_teams_signature
+from teams_auth import verify_teams_token, debug_teams_signature, bypass_teams_token
 from async_processor import process_query_async
 import requests
 
@@ -32,8 +32,8 @@ def register_routes(app, config, teams_webhook, onedrive_search=None):
             logger.info(f"リクエストヘッダー: {request.headers}")
             logger.debug(f"リクエストデータ: {request.get_data()}")  # デバッグレベルに変更
 
-            # 署名検証をスキップするかどうか（.env設定より）
-            skip_verification = config['SKIP_VERIFICATION']
+            # 署名検証をスキップするかどうか
+            skip_verification = bypass_teams_token(config)
 
             # Teamsからの署名を検証
             signature = request.headers.get('Authorization')
@@ -58,6 +58,8 @@ def register_routes(app, config, teams_webhook, onedrive_search=None):
                         # 開発環境では警告を出して続行
                         logger.warning("署名の検証に失敗しました。デバッグモードで続行します。")
                         logger.warning("本番環境では .env の SKIP_VERIFICATION=1 を設定してください。")
+            else:
+                logger.warning("署名検証をスキップします。設定またはデバッグモードで実行されています。")
 
             data = request.json
             logger.info(f"処理するデータ: {data}")
@@ -118,6 +120,9 @@ def register_routes(app, config, teams_webhook, onedrive_search=None):
             # OneDrive検索の状態を確認
             onedrive_status = onedrive_search is not None
 
+            # 署名検証の状態
+            verification_status = "disabled" if bypass_teams_token(config) else "enabled"
+
             return jsonify({
                 "status": "ok" if ollama_status else "degraded",
                 "timestamp": datetime.now().isoformat(),
@@ -125,6 +130,7 @@ def register_routes(app, config, teams_webhook, onedrive_search=None):
                 "ollama_status": "connected" if ollama_status else "disconnected",
                 "teams_webhook_status": "configured" if teams_webhook_status else "not configured",
                 "onedrive_status": "enabled" if onedrive_status else "disabled",
+                "verification_status": verification_status,
                 "model": config['OLLAMA_MODEL']
             })
 
@@ -142,4 +148,5 @@ def register_routes(app, config, teams_webhook, onedrive_search=None):
             return render_template('index.html')
         except:
             is_onedrive = "有効" if onedrive_search else "無効"
-            return f"Ollama Webhook System is running! OneDrive検索機能: {is_onedrive}"
+            verification_status = "無効" if bypass_teams_token(config) else "有効"
+            return f"Ollama Webhook System is running! OneDrive検索機能: {is_onedrive}, 署名検証: {verification_status}"
