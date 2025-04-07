@@ -1,4 +1,4 @@
-# onedrive_search.py - OneDriveファイル検索機能（改善版）
+# onedrive_search.py - OneDriveファイル検索機能（PDF抽出機能改善版）
 import os
 import logging
 import subprocess
@@ -59,6 +59,21 @@ class OneDriveSearch:
         # 検索結果キャッシュ（パフォーマンス向上のため）
         self.search_cache = {}
         self.cache_expiry = 300  # キャッシュの有効期限（秒）
+        
+        # PDFライブラリの確認
+        self.pdf_library = None
+        try:
+            import PyPDF2
+            self.pdf_library = "PyPDF2"
+            logger.info("PDFテキスト抽出にPyPDF2を使用します")
+        except ImportError:
+            try:
+                import pdfplumber
+                self.pdf_library = "pdfplumber"
+                logger.info("PDFテキスト抽出にpdfplumberを使用します")
+            except ImportError:
+                logger.warning("PDFテキスト抽出ライブラリがインストールされていません。PDF抽出機能は限定的です。")
+                logger.warning("pip install PyPDF2 または pip install pdfplumberを実行してください。")
 
     def search_files(self, keywords, file_types=None, max_results=None, use_cache=True):
         """
@@ -201,49 +216,13 @@ class OneDriveSearch:
             $results = @()
             try {{
                 $files = Get-ChildItem -Path "{search_path}" -Recurse -File -ErrorAction SilentlyContinue
-                $filtered = $files | Where-Object {{ {full_condition} }} | Select-Object -First {max_results * 2}
-                
-                # ファイル名に直接キーワードが含まれるものを優先
-                $nameMatches = $filtered | Where-Object {{ 
-                    $file = $_
-                    $containsAllKeywords = $true
-                    foreach ($term in @({','.join([f"'{term}'" for term in search_terms]) if search_terms else "'dummy'"})) {{
-                        if ($file.Name -notlike "*$term*") {{
-                            $containsAllKeywords = $false
-                            break
-                        }}
-                    }}
-                    return $containsAllKeywords
-                }} | Select-Object -First {max_results}
-                
-                # 残りの候補から追加
-                $remainingSlots = {max_results} - $nameMatches.Count
-                $otherMatches = @()
-                if ($remainingSlots -gt 0) {{
-                    $otherMatches = $filtered | Where-Object {{ 
-                        $file = $_
-                        $found = $false
-                        foreach ($nm in $nameMatches) {{
-                            if ($file.FullName -eq $nm.FullName) {{
-                                $found = $true
-                                break
-                            }}
-                        }}
-                        return !$found
-                    }} | Select-Object -First $remainingSlots
-                }}
-                
-                # 結果を結合
-                $finalResults = $nameMatches + $otherMatches
-                
-                foreach ($file in $finalResults) {{
+                $filtered = $files | Where-Object {{ {full_condition} }} | Select-Object -First {max_results}
+                foreach ($file in $filtered) {{
                     $results += @{{
                         path = $file.FullName
                         name = $file.Name
                         modified = $file.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
                         size = $file.Length
-                        created = $file.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
-                        extension = $file.Extension
                     }}
                 }}
                 ConvertTo-Json -InputObject $results -Depth 2
@@ -437,70 +416,124 @@ class OneDriveSearch:
 
     def _extract_pdf_content(self, file_path):
         """
-        PDFファイルからテキストを抽出する（改善版）
+        PDFファイルからテキストを抽出する（Python実装版）
+        
+        Args:
+            file_path: PDFファイルのパス
+            
+        Returns:
+            str: 抽出したテキスト
+        """
+        try:
+            # ファイル情報を取得
+            file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            file_size_kb = file_size / 1024
+            file_modified = datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%Y-%m-%d %H:%M:%S') if os.path.exists(file_path) else "不明"
+            
+            # 基本情報を準備
+            info = f"PDF名: {os.path.basename(file_path)}\n"
+            info += f"ファイルサイズ: {file_size_kb:.1f} KB\n"
+            info += f"最終更新日時: {file_modified}\n"
+            info += f"パス: {file_path}\n"
+            info += "----------------------------------------\n"
+            
+            # PyPDF2がインストールされているかチェック
+            try:
+                import PyPDF2
+                logger.info("PyPDF2を使用してPDFからテキストを抽出します")
+                
+                # PDFファイルを開く
+                with open(file_path, 'rb') as file:
+                    pdf_reader = PyPDF2.PdfReader(file)
+                    
+                    # ページ数を取得
+                    num_pages = len(pdf_reader.pages)
+                    info += f"PDFページ数: {num_pages}\n\n"
+                    
+                    # 各ページからテキストを抽出
+                    full_text = ""
+                    for page_num in range(min(num_pages, 10)):  # 最初の10ページまで抽出（パフォーマンスのため）
+                        page = pdf_reader.pages[page_num]
+                        page_text = page.extract_text()
+                        if page_text:
+                            full_text += f"--- ページ {page_num + 1} ---\n"
+                            full_text += page_text + "\n\n"
+                    
+                    if num_pages > 10:
+                        full_text += f"(残り {num_pages - 10} ページは省略されました)\n"
+                    
+                    # テキストがない場合
+                    if not full_text.strip():
+                        info += "PDFからテキストを抽出できませんでした。画像ベースのPDFである可能性があります。\n"
+                        return info
+                    
+                    return info + full_text
+                    
+            except ImportError:
+                # pdfplumberを試す
+                try:
+                    import pdfplumber
+                    logger.info("pdfplumberを使用してPDFからテキストを抽出します")
+                    
+                    with pdfplumber.open(file_path) as pdf:
+                        num_pages = len(pdf.pages)
+                        info += f"PDFページ数: {num_pages}\n\n"
+                        
+                        full_text = ""
+                        for page_num in range(min(num_pages, 10)):  # 最初の10ページまで
+                            page = pdf.pages[page_num]
+                            page_text = page.extract_text()
+                            if page_text:
+                                full_text += f"--- ページ {page_num + 1} ---\n"
+                                full_text += page_text + "\n\n"
+                        
+                        if num_pages > 10:
+                            full_text += f"(残り {num_pages - 10} ページは省略されました)\n"
+                        
+                        if not full_text.strip():
+                            info += "PDFからテキストを抽出できませんでした。画像ベースのPDFである可能性があります。\n"
+                            return info
+                        
+                        return info + full_text
+                        
+                except ImportError:
+                    # どちらのPDFライブラリもない場合はPowerShellを試す
+                    info += "PDF抽出ライブラリ(PyPDF2, pdfplumber)がインストールされていません。\n"
+                    info += "PowerShellを使用して抽出を試みます...\n\n"
+                    
+                    # PowerShellを使用した抽出
+                    return self._extract_pdf_content_powershell(file_path, info)
+        
+        except Exception as e:
+            logger.error(f"PDF抽出中にエラーが発生しました: {str(e)}")
+            return f"PDF名: {os.path.basename(file_path)}\nPDF抽出中にエラーが発生しました: {str(e)}"
+            
+    def _extract_pdf_content_powershell(self, file_path, info=""):
+        """
+        PowerShellを使用してPDFからテキストを抽出する（バックアップ方法）
         """
         cmd = f"""
         try {{
             # ファイルの存在確認
             if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                $pdfInfo = "PDF名: {os.path.basename(file_path)}"
-                $pdfInfo += "`nファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                $pdfInfo += "`n最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                $pdfInfo += "`n----------------------------------------"
-                
-                # PDF内容の抽出を試みる（サードパーティ製ツールがなくてもメタデータは取得）
+                # Word.Application COMオブジェクトを使用してPDFを開く試み
                 try {{
-                    # PDFメタデータの取得を試みる
-                    Add-Type -AssemblyName System.IO.Compression.FileSystem
-                    $pdfInfo += "`n[PDF内容要約]`n"
+                    $word = New-Object -ComObject Word.Application -ErrorAction Stop
+                    $word.Visible = $false
+                    $doc = $word.Documents.Open("{file_path}")
+                    $text = $doc.Content.Text
+                    $doc.Close()
+                    $word.Quit()
+                    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($word) | Out-Null
                     
-                    # バイナリデータから簡易メタデータ抽出（テキスト部分のみ）
-                    $pdfBytes = [System.IO.File]::ReadAllBytes("{file_path}")
-                    $pdfText = [System.Text.Encoding]::ASCII.GetString($pdfBytes)
-                    
-                    # タイトルの抽出試行
-                    $titleMatch = [regex]::Match($pdfText, "/Title\\s*\\(([^)]+)\\)")
-                    if ($titleMatch.Success) {{
-                        $pdfInfo += "`nタイトル: " + $titleMatch.Groups[1].Value
-                    }}
-                    
-                    # 作成者の抽出試行
-                    $authorMatch = [regex]::Match($pdfText, "/Author\\s*\\(([^)]+)\\)")
-                    if ($authorMatch.Success) {{
-                        $pdfInfo += "`n作成者: " + $authorMatch.Groups[1].Value
-                    }}
-                    
-                    # キーワードの抽出試行
-                    $keywordsMatch = [regex]::Match($pdfText, "/Keywords\\s*\\(([^)]+)\\)")
-                    if ($keywordsMatch.Success) {{
-                        $pdfInfo += "`nキーワード: " + $keywordsMatch.Groups[1].Value
-                    }}
-                    
-                    # 簡易テキスト抽出（完全ではない）
-                    $textMatches = [regex]::Matches($pdfText, "\\(([\\w\\s,.;:!?-]{{10,}})\\)")
-                    if ($textMatches.Count -gt 0) {{
-                        $pdfInfo += "`n`n[PDFから抽出されたテキスト（部分的）]`n"
-                        $extractedText = @()
-                        foreach ($match in $textMatches) {{
-                            $text = $match.Groups[1].Value
-                            # 意味のありそうなテキストのみを抽出（短すぎるものや記号のみは除外）
-                            if ($text.Length -gt 20 -and $text -match "[a-zA-Z0-9ぁ-んァ-ン一-龥]") {{
-                                $extractedText += $text
-                            }}
-                        }}
-                        
-                        # 重複を避け、最も長いテキスト部分を最大5つまで表示
-                        $uniqueTexts = $extractedText | Sort-Object -Property Length -Descending | Select-Object -First 5
-                        $pdfInfo += $uniqueTexts -join "`n`n"
-                    }} else {{
-                        $pdfInfo += "`n`nPDFからテキストを抽出できませんでした。"
-                    }}
-                    
+                    # PDFの内容を出力
+                    "Word COMを使用してPDFからテキストを抽出しました:"
+                    "----------------------------------------"
+                    $text
                 }} catch {{
-                    $pdfInfo += "`nPDFの内容抽出に失敗しました: $_"
+                    "Word COMを使用したPDF抽出に失敗しました。"
+                    "このPDFの内容は直接読み取れませんでした。"
                 }}
-                
-                $pdfInfo
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -508,78 +541,30 @@ class OneDriveSearch:
             "エラーが発生しました: $_"
         }}
         """
-        return self._extract_file_content_helper(file_path, cmd)
+        
+        # PowerShellの結果を取得
+        ps_result = self._extract_file_content_helper(file_path, cmd)
+        
+        # 結果がなければ基本情報だけ返す
+        if not ps_result or len(ps_result.strip()) < 50:
+            return info + "\nPDFの内容を抽出できませんでした。テキスト抽出に対応していないPDFである可能性があります。\n"
+        
+        return info + ps_result
 
     def _extract_word_content(self, file_path):
         """
-        Wordファイル(docx)からテキストを抽出する（改善版）
+        Wordファイル(docx)からテキストを抽出する
         """
         cmd = f"""
         try {{
             # ファイルの存在確認
             if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                $wordInfo = "Word文書名: {os.path.basename(file_path)}`n"
-                $wordInfo += "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes`n"
-                $wordInfo += "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime + "`n"
-                $wordInfo += "----------------------------------------`n"
-                
-                # DOCXファイルはZIPファイルなので展開して内容を抽出
-                try {{
-                    Add-Type -Assembly System.IO.Compression.FileSystem
-                    $tempFolder = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [Guid]::NewGuid().ToString())
-                    [System.IO.Directory]::CreateDirectory($tempFolder)
-                    
-                    # ZIPとして展開
-                    [System.IO.Compression.ZipFile]::ExtractToDirectory("{file_path}", $tempFolder)
-                    
-                    # document.xmlからテキスト抽出
-                    $docXmlPath = [System.IO.Path]::Combine($tempFolder, "word", "document.xml")
-                    if (Test-Path $docXmlPath) {{
-                        $docXml = [System.Xml.XmlDocument]::new()
-                        $docXml.Load($docXmlPath)
-                        $nsManager = [System.Xml.XmlNamespaceManager]::new($docXml.NameTable)
-                        $nsManager.AddNamespace("w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
-                        
-                        # テキスト要素を抽出
-                        $textNodes = $docXml.SelectNodes("//w:t", $nsManager)
-                        $text = ""
-                        foreach ($node in $textNodes) {{
-                            $text += $node.InnerText + " "
-                        }}
-                        
-                        $wordInfo += "`n[文書内容]`n" + $text
-                    }} else {{
-                        $wordInfo += "`n文書の内容を抽出できませんでした。"
-                    }}
-                    
-                    # プロパティの抽出
-                    $corePropsPath = [System.IO.Path]::Combine($tempFolder, "docProps", "core.xml")
-                    if (Test-Path $corePropsPath) {{
-                        $coreXml = [System.Xml.XmlDocument]::new()
-                        $coreXml.Load($corePropsPath)
-                        $nsManager = [System.Xml.XmlNamespaceManager]::new($coreXml.NameTable)
-                        $nsManager.AddNamespace("dc", "http://purl.org/dc/elements/1.1/")
-                        $nsManager.AddNamespace("cp", "http://schemas.openxmlformats.org/package/2006/metadata/core-properties")
-                        
-                        $title = $coreXml.SelectSingleNode("//dc:title", $nsManager)
-                        $creator = $coreXml.SelectSingleNode("//dc:creator", $nsManager)
-                        
-                        $wordInfo += "`n`n[文書プロパティ]`n"
-                        if ($title -and $title.InnerText) {{
-                            $wordInfo += "タイトル: " + $title.InnerText + "`n"
-                        }}
-                        if ($creator -and $creator.InnerText) {{
-                            $wordInfo += "作成者: " + $creator.InnerText + "`n"
-                        }}
-                    }}
-                    
-                    # 一時フォルダの削除
-                    Remove-Item -Path $tempFolder -Recurse -Force
-                }} catch {{
-                    $wordInfo += "Word文書の内容抽出中にエラーが発生しました: $_"
-                }}
-                
-                $wordInfo
+                "Word文書名: {os.path.basename(file_path)}"
+                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
+                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
+                "----------------------------------------"
+                # Wordアプリケーションを使わず、基本情報のみ表示
+                "このWord文書からのテキスト抽出はサポートされていません"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -591,127 +576,17 @@ class OneDriveSearch:
 
     def _extract_excel_content(self, file_path):
         """
-        Excelファイル(xlsx)から基本情報を抽出する（改善版）
+        Excelファイル(xlsx)から基本情報を抽出する
         """
         cmd = f"""
         try {{
             # ファイルの存在確認
             if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                $excelInfo = "Excel名: {os.path.basename(file_path)}`n"
-                $excelInfo += "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes`n"
-                $excelInfo += "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime + "`n"
-                $excelInfo += "----------------------------------------`n"
-                
-                # XLSXファイルはZIPファイルなので展開して内容を抽出
-                try {{
-                    Add-Type -Assembly System.IO.Compression.FileSystem
-                    $tempFolder = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [Guid]::NewGuid().ToString())
-                    [System.IO.Directory]::CreateDirectory($tempFolder)
-                    
-                    # ZIPとして展開
-                    [System.IO.Compression.ZipFile]::ExtractToDirectory("{file_path}", $tempFolder)
-                    
-                    # シート名の抽出
-                    $workbookPath = [System.IO.Path]::Combine($tempFolder, "xl", "workbook.xml")
-                    if (Test-Path $workbookPath) {{
-                        $workbookXml = [System.Xml.XmlDocument]::new()
-                        $workbookXml.Load($workbookPath)
-                        
-                        $nsManager = [System.Xml.XmlNamespaceManager]::new($workbookXml.NameTable)
-                        $nsManager.AddNamespace("x", "http://schemas.openxmlformats.org/spreadsheetml/2006/main")
-                        
-                        $sheetNodes = $workbookXml.SelectNodes("//x:sheet", $nsManager)
-                        
-                        $excelInfo += "`n[ブック構成]`n"
-                        if ($sheetNodes.Count -gt 0) {{
-                            $excelInfo += "シート数: " + $sheetNodes.Count + "`n"
-                            $excelInfo += "シート名: "
-                            $sheetNames = @()
-                            foreach ($sheet in $sheetNodes) {{
-                                $sheetNames += $sheet.GetAttribute("name")
-                            }}
-                            $excelInfo += $sheetNames -join ", "
-                            $excelInfo += "`n"
-                            
-                            # 先頭シートの内容を抽出（簡易）
-                            $firstSheetId = $sheetNodes[0].GetAttribute("sheetId")
-                            $sheetPath = [System.IO.Path]::Combine($tempFolder, "xl", "worksheets", "sheet1.xml")
-                            
-                            if (Test-Path $sheetPath) {{
-                                $sheetXml = [System.Xml.XmlDocument]::new()
-                                $sheetXml.Load($sheetPath)
-                                
-                                $nsManager = [System.Xml.XmlNamespaceManager]::new($sheetXml.NameTable)
-                                $nsManager.AddNamespace("x", "http://schemas.openxmlformats.org/spreadsheetml/2006/main")
-                                
-                                # セル数をカウント
-                                $cells = $sheetXml.SelectNodes("//x:c", $nsManager)
-                                
-                                $excelInfo += "`n[最初のシート情報]`n"
-                                $excelInfo += "シート名: " + $sheetNames[0] + "`n"
-                                $excelInfo += "セル数: " + $cells.Count + "`n"
-                                
-                                # データ内の文字列を簡易的に取得（最大10要素）
-                                $stringTablePath = [System.IO.Path]::Combine($tempFolder, "xl", "sharedStrings.xml")
-                                if (Test-Path $stringTablePath) {{
-                                    $stringXml = [System.Xml.XmlDocument]::new()
-                                    $stringXml.Load($stringTablePath)
-                                    
-                                    $nsManager = [System.Xml.XmlNamespaceManager]::new($stringXml.NameTable)
-                                    $nsManager.AddNamespace("x", "http://schemas.openxmlformats.org/spreadsheetml/2006/main")
-                                    
-                                    $strings = $stringXml.SelectNodes("//x:t", $nsManager) | Select-Object -First 20
-                                    
-                                    if ($strings.Count -gt 0) {{
-                                        $excelInfo += "`n[データサンプル]`n"
-                                        $dataItems = @()
-                                        foreach ($string in $strings) {{
-                                            if ($string.InnerText.Trim() -ne "") {{
-                                                $dataItems += $string.InnerText
-                                            }}
-                                        }}
-                                        $excelInfo += $dataItems -join ", "
-                                    }}
-                                }}
-                            }}
-                        }} else {{
-                            $excelInfo += "シート情報を取得できませんでした。"
-                        }}
-                    }} else {{
-                        $excelInfo += "`nブック構成を取得できませんでした。"
-                    }}
-                    
-                    # プロパティの抽出
-                    $corePropsPath = [System.IO.Path]::Combine($tempFolder, "docProps", "core.xml")
-                    if (Test-Path $corePropsPath) {{
-                        $coreXml = [System.Xml.XmlDocument]::new()
-                        $coreXml.Load($corePropsPath)
-                        
-                        $nsManager = [System.Xml.XmlNamespaceManager]::new($coreXml.NameTable)
-                        $nsManager.AddNamespace("dc", "http://purl.org/dc/elements/1.1/")
-                        $nsManager.AddNamespace("cp", "http://schemas.openxmlformats.org/package/2006/metadata/core-properties")
-                        
-                        $title = $coreXml.SelectSingleNode("//dc:title", $nsManager)
-                        $creator = $coreXml.SelectSingleNode("//dc:creator", $nsManager)
-                        
-                        if (($title -and $title.InnerText) -or ($creator -and $creator.InnerText)) {{
-                            $excelInfo += "`n`n[ブックプロパティ]`n"
-                            if ($title -and $title.InnerText) {{
-                                $excelInfo += "タイトル: " + $title.InnerText + "`n"
-                            }}
-                            if ($creator -and $creator.InnerText) {{
-                                $excelInfo += "作成者: " + $creator.InnerText + "`n"
-                            }}
-                        }}
-                    }}
-                    
-                    # 一時フォルダの削除
-                    Remove-Item -Path $tempFolder -Recurse -Force
-                }} catch {{
-                    $excelInfo += "`nExcel内容の抽出中にエラー: $_"
-                }}
-                
-                $excelInfo
+                "Excel名: {os.path.basename(file_path)}"
+                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
+                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
+                "----------------------------------------"
+                "このExcelからのデータ抽出はサポートされていません"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -723,98 +598,17 @@ class OneDriveSearch:
 
     def _extract_powerpoint_content(self, file_path):
         """
-        PowerPointファイル(pptx)から基本情報を抽出する（改善版）
+        PowerPointファイル(pptx)から基本情報を抽出する
         """
         cmd = f"""
         try {{
             # ファイルの存在確認
             if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                $pptInfo = "PowerPoint名: {os.path.basename(file_path)}`n"
-                $pptInfo += "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes`n"
-                $pptInfo += "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime + "`n"
-                $pptInfo += "----------------------------------------`n"
-                
-                # PPTXファイルはZIPファイルなので展開して内容を抽出
-                try {{
-                    Add-Type -Assembly System.IO.Compression.FileSystem
-                    $tempFolder = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [Guid]::NewGuid().ToString())
-                    [System.IO.Directory]::CreateDirectory($tempFolder)
-                    
-                    # ZIPとして展開
-                    [System.IO.Compression.ZipFile]::ExtractToDirectory("{file_path}", $tempFolder)
-                    
-                    # スライド数をカウント
-                    $slidesFolder = [System.IO.Path]::Combine($tempFolder, "ppt", "slides")
-                    if (Test-Path $slidesFolder) {{
-                        $slides = Get-ChildItem -Path $slidesFolder -Filter "slide*.xml"
-                        $slideCount = $slides.Count
-                        
-                        $pptInfo += "`n[プレゼンテーション構成]`n"
-                        $pptInfo += "スライド数: $slideCount`n"
-                        
-                        # スライドのテキスト抽出（最初の数枚）
-                        $pptInfo += "`n[スライド内容サンプル]`n"
-                        
-                        $slideTexts = @()
-                        foreach ($slide in $slides | Select-Object -First 5) {{
-                            $slideXml = [System.Xml.XmlDocument]::new()
-                            $slideXml.Load($slide.FullName)
-                            
-                            $nsManager = [System.Xml.XmlNamespaceManager]::new($slideXml.NameTable)
-                            $nsManager.AddNamespace("a", "http://schemas.openxmlformats.org/drawingml/2006/main")
-                            
-                            $textNodes = $slideXml.SelectNodes("//a:t", $nsManager)
-                            $slideText = "スライド " + $slide.Name.Replace("slide", "").Replace(".xml", "") + ": "
-                            
-                            $textItems = @()
-                            foreach ($node in $textNodes) {{
-                                if ($node.InnerText.Trim() -ne "") {{
-                                    $textItems += $node.InnerText
-                                }}
-                            }}
-                            
-                            if ($textItems.Count -gt 0) {{
-                                $slideText += $textItems -join " "
-                                $slideTexts += $slideText
-                            }}
-                        }}
-                        
-                        $pptInfo += $slideTexts -join "`n"
-                    }} else {{
-                        $pptInfo += "`nスライド情報を取得できませんでした。"
-                    }}
-                    
-                    # プロパティの抽出
-                    $corePropsPath = [System.IO.Path]::Combine($tempFolder, "docProps", "core.xml")
-                    if (Test-Path $corePropsPath) {{
-                        $coreXml = [System.Xml.XmlDocument]::new()
-                        $coreXml.Load($corePropsPath)
-                        
-                        $nsManager = [System.Xml.XmlNamespaceManager]::new($coreXml.NameTable)
-                        $nsManager.AddNamespace("dc", "http://purl.org/dc/elements/1.1/")
-                        $nsManager.AddNamespace("cp", "http://schemas.openxmlformats.org/package/2006/metadata/core-properties")
-                        
-                        $title = $coreXml.SelectSingleNode("//dc:title", $nsManager)
-                        $creator = $coreXml.SelectSingleNode("//dc:creator", $nsManager)
-                        
-                        if (($title -and $title.InnerText) -or ($creator -and $creator.InnerText)) {{
-                            $pptInfo += "`n`n[プレゼンテーションプロパティ]`n"
-                            if ($title -and $title.InnerText) {{
-                                $pptInfo += "タイトル: " + $title.InnerText + "`n"
-                            }}
-                            if ($creator -and $creator.InnerText) {{
-                                $pptInfo += "作成者: " + $creator.InnerText + "`n"
-                            }}
-                        }}
-                    }}
-                    
-                    # 一時フォルダの削除
-                    Remove-Item -Path $tempFolder -Recurse -Force
-                }} catch {{
-                    $pptInfo += "`nPowerPoint内容の抽出中にエラー: $_"
-                }}
-                
-                $pptInfo
+                "PowerPoint名: {os.path.basename(file_path)}"
+                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
+                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
+                "----------------------------------------"
+                "このPowerPointからのテキスト抽出はサポートされていません"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -826,7 +620,7 @@ class OneDriveSearch:
 
     def get_relevant_content(self, query, max_files=None, max_chars=8000):
         """
-        クエリに関連する内容を取得（改善版）
+        クエリに関連する内容を取得
 
         Args:
             query: 検索クエリ
@@ -873,6 +667,8 @@ class OneDriveSearch:
                     keywords.append(clean_word)
                 elif not date_str:
                     keywords.append(clean_word)
+                else:
+                    pass
 
         # キーワードが少なすぎる場合のバックアップとして日報関連の単語を追加
         if len(keywords) < 2:
@@ -904,32 +700,17 @@ class OneDriveSearch:
             file_name = result.get('name')
             modified = result.get('modified', '不明')
             file_size = result.get('size', 0)
-            
-            # ファイルサイズを見やすい形式に変換
-            if file_size:
-                if file_size < 1024:
-                    size_str = f"{file_size} バイト"
-                elif file_size < 1024 * 1024:
-                    size_str = f"{file_size / 1024:.1f} KB"
-                else:
-                    size_str = f"{file_size / (1024 * 1024):.1f} MB"
-            else:
-                size_str = "不明"
+            file_size_kb = file_size / 1024 if file_size else 0
 
+            # ファイルサイズをキロバイト単位で追加
+            file_info = f"=== ファイル {i+1}: {file_name} ===\n"
+            file_info += f"更新日時: {modified} サイズ: {file_size_kb:.1f} KB パス: {file_path}\n"
+            
             # ファイルの内容を読み込み
             content = self.read_file_content(file_path)
 
-            # コンテンツのプレビューを追加（文字数制限あり）
-            preview_length = min(2000, len(content))  # 1ファイルあたり最大2000文字
-            preview = content[:preview_length]
-            if len(content) > preview_length:
-                preview += "..."
-
-            file_content = f"=== ファイル {i+1}: {file_name} ===\n"
-            file_content += f"更新日時: {modified}\n"
-            file_content += f"サイズ: {size_str}\n"
-            file_content += f"パス: {file_path}\n\n"
-            file_content += f"{preview}\n\n"
+            # ファイル情報とコンテンツを結合
+            file_content = file_info + content + "\n\n"
 
             # 最大文字数をチェック
             if total_chars + len(file_content) > max_chars:

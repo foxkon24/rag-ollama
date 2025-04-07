@@ -231,10 +231,44 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                     # 検索結果原文を追加
                     search_result_raw = "\n\n【検索結果原文】\n" + onedrive_context
                     
-                    # 検索結果原文を追加する前の長さを確認して省略判断
+                    # PDFファイルの情報がある場合、見やすく整形
+                    if ".pdf" in search_result_raw.lower() and "pdf名:" in search_result_raw.lower():
+                        # PDFファイル情報の整形（PDFの内容部分を見やすく）
+                        pdf_sections = re.findall(r'(=== ファイル \d+:.+?PDF名:.+?-+\n)(.*?)(?===|\Z)', search_result_raw, re.DOTALL)
+                        if pdf_sections:
+                            formatted_search_result = ""
+                            for header, content in pdf_sections:
+                                formatted_search_result += header + "\n"
+                                
+                                # 抽出されたPDFテキストの整形
+                                if "PDFページ数:" in content:
+                                    # 新しいPDF抽出形式
+                                    formatted_search_result += content
+                                else:
+                                    # 従来の形式またはPowerShellからの出力
+                                    formatted_search_result += content.strip() + "\n\n"
+                            
+                            # 元の検索結果の最初の部分（件数情報など）を保持
+                            first_file_pos = search_result_raw.find("=== ファイル 1:")
+                            if first_file_pos > 0:
+                                header_part = search_result_raw[:first_file_pos]
+                                search_result_raw = header_part + formatted_search_result
+                    
+                    # 長すぎる場合は省略
                     if len(generated_text) + len(search_result_raw) > 8000:
-                        # 長すぎる場合は省略
-                        search_result_raw = search_result_raw[:4000] + "\n...(省略)...\n"
+                        # 長すぎる場合は省略するが、PDF情報部分は保持する
+                        max_length = 4000
+                        if ".pdf" in search_result_raw.lower() and "pdf名:" in search_result_raw.lower():
+                            # PDFファイル情報の前後を保持
+                            pdf_intro_pos = search_result_raw.lower().find("pdf名:")
+                            if pdf_intro_pos > 0:
+                                # PDF情報の前半部分
+                                first_part = search_result_raw[:pdf_intro_pos+500]
+                                # 残りの部分は省略
+                                search_result_raw = first_part + "\n...(省略)...\n"
+                        else:
+                            # 単純に切り詰め
+                            search_result_raw = search_result_raw[:max_length] + "\n...(省略)...\n"
                     
                     # 参照情報を回答の最後に追加
                     generated_text += search_result_raw
