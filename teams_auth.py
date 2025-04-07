@@ -4,6 +4,7 @@ import hmac
 import hashlib
 import base64
 import json
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -41,87 +42,264 @@ def verify_teams_token(request_data, signature, teams_outgoing_token):
     token_preview = teams_outgoing_token[:5] + "..." if teams_outgoing_token else "なし"
     logger.debug(f"認証トークン: {token_preview}")
 
+    # トークンの前処理（末尾の=が欠けている場合の対応）
+    if not teams_outgoing_token.endswith('='):
+        padded_token = teams_outgoing_token
+        while len(padded_token) % 4 != 0:
+            padded_token += '='
+        teams_outgoing_token = padded_token
+        logger.debug(f"認証トークンにパディングを追加: {teams_outgoing_token[:5]}...")
+
+    # Teamsで使用される署名検証方法の網羅的テスト
+    verification_methods = [
+        verify_raw_data,
+        verify_json_compact,
+        verify_json_normalized,
+        verify_canonical_json,
+        verify_utf8_encoded_json,
+        verify_json_no_whitespace,
+        verify_body_only,
+        verify_payload_string
+    ]
+
+    for method in verification_methods:
+        if method(request_data, clean_signature, teams_outgoing_token):
+            logger.info(f"署名検証に成功しました: {method.__name__}")
+            return True
+
+    # すべての検証方法が失敗した場合
+    logger.warning(f"すべての署名検証方法が失敗しました。詳細なデバッグ情報を出力します。")
+    
+    # 詳細なデバッグ情報
+    debug_info = debug_teams_signature(request_data, teams_outgoing_token)
+    logger.debug(f"デバッグ署名情報: {debug_info}")
+    
+    return False
+
+def verify_raw_data(request_data, signature, token):
+    """生のリクエストデータをそのまま使用して検証"""
     try:
-        # バイナリに変換
         if isinstance(request_data, str):
             request_data = request_data.encode('utf-8')
         
-        # HMAC-SHA256を使用した署名の計算方法1
-        computed_hmac_hex = hmac.new(
-            key=teams_outgoing_token.encode('utf-8'),
-            msg=request_data,
-            digestmod=hashlib.sha256
-        ).hexdigest()
-        
-        # HMAC-SHA256を使用した署名の計算方法2 (Base64エンコード)
         computed_hmac_b64 = base64.b64encode(
             hmac.new(
-                key=teams_outgoing_token.encode('utf-8'),
+                key=token.encode('utf-8'),
                 msg=request_data,
                 digestmod=hashlib.sha256
             ).digest()
         ).decode('utf-8')
         
-        logger.debug(f"計算したHMAC(hex): {computed_hmac_hex}")
-        logger.debug(f"計算したHMAC(b64): {computed_hmac_b64}")
-        
-        # 両方の方法で検証
-        is_valid_hex = hmac.compare_digest(computed_hmac_hex, clean_signature)
-        is_valid_b64 = hmac.compare_digest(computed_hmac_b64, clean_signature)
-        
-        if is_valid_hex:
-            logger.info("16進数HMAC署名の検証に成功しました")
-            return True
-        elif is_valid_b64:
-            logger.info("Base64 HMAC署名の検証に成功しました")
-            return True
-        else:
-            # ログに詳細を記録
-            logger.warning(f"署名検証失敗: 受信={clean_signature}, 計算(hex)={computed_hmac_hex}, 計算(b64)={computed_hmac_b64}")
-            
-            # Teamsが送る形式でJSON文字列を再計算してみる
-            try:
-                # JSON文字列としてパース
-                json_data = json.loads(request_data)
-                # 再エンコード（JSONフォーマットの違いを吸収）
-                json_str = json.dumps(json_data, separators=(',', ':'))
-                
-                # 再計算したHMACの生成
-                computed_hmac_json_hex = hmac.new(
-                    key=teams_outgoing_token.encode('utf-8'),
-                    msg=json_str.encode('utf-8'),
-                    digestmod=hashlib.sha256
-                ).hexdigest()
-                
-                computed_hmac_json_b64 = base64.b64encode(
-                    hmac.new(
-                        key=teams_outgoing_token.encode('utf-8'),
-                        msg=json_str.encode('utf-8'),
-                        digestmod=hashlib.sha256
-                    ).digest()
-                ).decode('utf-8')
-                
-                logger.debug(f"JSON再エンコード後のHMAC(hex): {computed_hmac_json_hex}")
-                logger.debug(f"JSON再エンコード後のHMAC(b64): {computed_hmac_json_b64}")
-                
-                # 再エンコード後の検証
-                is_valid_json_hex = hmac.compare_digest(computed_hmac_json_hex, clean_signature)
-                is_valid_json_b64 = hmac.compare_digest(computed_hmac_json_b64, clean_signature)
-                
-                if is_valid_json_hex or is_valid_json_b64:
-                    logger.info("JSON再エンコード後の署名検証に成功しました")
-                    return True
-            except json.JSONDecodeError:
-                logger.debug("リクエストデータはJSON形式ではありません")
-            except Exception as json_err:
-                logger.debug(f"JSON検証中にエラー: {str(json_err)}")
-            
-            return False
-
+        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
+        if is_valid:
+            logger.debug(f"生データ(Base64)での検証に成功しました")
+        return is_valid
     except Exception as e:
-        logger.error(f"署名検証中にエラーが発生しました: {str(e)}")
+        logger.debug(f"生データでの検証中にエラー: {str(e)}")
         return False
 
+def verify_json_compact(request_data, signature, token):
+    """JSONをコンパクト形式に変換して検証"""
+    try:
+        # JSON文字列としてパース
+        if isinstance(request_data, bytes):
+            data = json.loads(request_data.decode('utf-8'))
+        else:
+            data = json.loads(request_data)
+        
+        # コンパクト形式に再エンコード
+        compact_json = json.dumps(data, separators=(',', ':'))
+        
+        # Base64エンコードされたHMAC計算
+        computed_hmac_b64 = base64.b64encode(
+            hmac.new(
+                key=token.encode('utf-8'),
+                msg=compact_json.encode('utf-8'),
+                digestmod=hashlib.sha256
+            ).digest()
+        ).decode('utf-8')
+        
+        # 署名を比較
+        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
+        if is_valid:
+            logger.debug(f"コンパクトJSON(Base64)での検証に成功しました")
+        return is_valid
+    except Exception as e:
+        logger.debug(f"JSONコンパクト化での検証中にエラー: {str(e)}")
+        return False
+
+def verify_json_normalized(request_data, signature, token):
+    """JSONを正規化して検証"""
+    try:
+        # JSON文字列としてパース
+        if isinstance(request_data, bytes):
+            data = json.loads(request_data.decode('utf-8'))
+        else:
+            data = json.loads(request_data)
+        
+        # 文字列の場合はJSONに変換し、順序を正規化して文字列に戻す
+        # キーを辞書順にソートしてJSON文字列を生成
+        normalized_json = json.dumps(data, sort_keys=True)
+        
+        # Base64エンコードされたHMAC計算
+        computed_hmac_b64 = base64.b64encode(
+            hmac.new(
+                key=token.encode('utf-8'),
+                msg=normalized_json.encode('utf-8'),
+                digestmod=hashlib.sha256
+            ).digest()
+        ).decode('utf-8')
+        
+        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
+        if is_valid:
+            logger.debug(f"正規化JSON(Base64)での検証に成功しました")
+        return is_valid
+    except Exception as e:
+        logger.debug(f"JSON正規化での検証中にエラー: {str(e)}")
+        return False
+
+def verify_canonical_json(request_data, signature, token):
+    """正規化JSONをカノニカル形式に変換して検証"""
+    try:
+        # JSON文字列としてパース
+        if isinstance(request_data, bytes):
+            data = json.loads(request_data.decode('utf-8'))
+        else:
+            data = json.loads(request_data)
+        
+        # カノニカルJSON形式（キーをソート＋コンパクト形式）
+        canonical_json = json.dumps(data, sort_keys=True, separators=(',', ':'))
+        
+        # Base64エンコードされたHMAC計算
+        computed_hmac_b64 = base64.b64encode(
+            hmac.new(
+                key=token.encode('utf-8'),
+                msg=canonical_json.encode('utf-8'),
+                digestmod=hashlib.sha256
+            ).digest()
+        ).decode('utf-8')
+        
+        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
+        if is_valid:
+            logger.debug(f"カノニカルJSON(Base64)での検証に成功しました")
+        return is_valid
+    except Exception as e:
+        logger.debug(f"カノニカルJSONでの検証中にエラー: {str(e)}")
+        return False
+
+def verify_utf8_encoded_json(request_data, signature, token):
+    """UTF-8エンコードしたJSONで検証"""
+    try:
+        # JSON文字列を取得
+        if isinstance(request_data, bytes):
+            json_str = request_data.decode('utf-8')
+        else:
+            json_str = request_data
+        
+        # 明示的にUTF-8エンコード
+        json_bytes = json_str.encode('utf-8')
+        
+        # Base64エンコードされたHMAC計算
+        computed_hmac_b64 = base64.b64encode(
+            hmac.new(
+                key=token.encode('utf-8'),
+                msg=json_bytes,
+                digestmod=hashlib.sha256
+            ).digest()
+        ).decode('utf-8')
+        
+        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
+        if is_valid:
+            logger.debug(f"UTF-8エンコードJSON(Base64)での検証に成功しました")
+        return is_valid
+    except Exception as e:
+        logger.debug(f"UTF-8エンコードでの検証中にエラー: {str(e)}")
+        return False
+
+def verify_json_no_whitespace(request_data, signature, token):
+    """空白を除去したJSONで検証"""
+    try:
+        # JSON文字列を取得
+        if isinstance(request_data, bytes):
+            json_str = request_data.decode('utf-8')
+        else:
+            json_str = request_data
+        
+        # 空白を除去
+        no_whitespace = re.sub(r'\s', '', json_str)
+        
+        # Base64エンコードされたHMAC計算
+        computed_hmac_b64 = base64.b64encode(
+            hmac.new(
+                key=token.encode('utf-8'),
+                msg=no_whitespace.encode('utf-8'),
+                digestmod=hashlib.sha256
+            ).digest()
+        ).decode('utf-8')
+        
+        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
+        if is_valid:
+            logger.debug(f"空白除去JSON(Base64)での検証に成功しました")
+        return is_valid
+    except Exception as e:
+        logger.debug(f"空白除去での検証中にエラー: {str(e)}")
+        return False
+
+def verify_body_only(request_data, signature, token):
+    """body部分だけを抽出して検証（Microsoft Teams特有の処理）"""
+    try:
+        # JSON文字列としてパース
+        if isinstance(request_data, bytes):
+            data = json.loads(request_data.decode('utf-8'))
+        else:
+            data = json.loads(request_data)
+        
+        # Teamsの場合、bodyフィールドのみを使う可能性がある
+        if 'body' in data:
+            body_json = json.dumps(data['body'], separators=(',', ':'))
+            
+            # Base64エンコードされたHMAC計算
+            computed_hmac_b64 = base64.b64encode(
+                hmac.new(
+                    key=token.encode('utf-8'),
+                    msg=body_json.encode('utf-8'),
+                    digestmod=hashlib.sha256
+                ).digest()
+            ).decode('utf-8')
+            
+            is_valid = hmac.compare_digest(computed_hmac_b64, signature)
+            if is_valid:
+                logger.debug(f"bodyフィールドのみ(Base64)での検証に成功しました")
+            return is_valid
+    except Exception as e:
+        logger.debug(f"bodyフィールド検証中にエラー: {str(e)}")
+    
+    return False
+
+def verify_payload_string(request_data, signature, token):
+    """文字列形式のペイロードをそのまま使用（Microsoft Teams特有の処理）"""
+    try:
+        # リクエストデータを文字列として扱う
+        payload_str = request_data
+        if isinstance(request_data, bytes):
+            payload_str = request_data.decode('utf-8')
+        
+        # 直接文字列を使用してHMACを計算
+        computed_hmac_b64 = base64.b64encode(
+            hmac.new(
+                key=token.encode('utf-8'),
+                msg=payload_str.encode('utf-8'),
+                digestmod=hashlib.sha256
+            ).digest()
+        ).decode('utf-8')
+        
+        is_valid = hmac.compare_digest(computed_hmac_b64, signature)
+        if is_valid:
+            logger.debug(f"ペイロード文字列(Base64)での検証に成功しました")
+        return is_valid
+    except Exception as e:
+        logger.debug(f"ペイロード文字列での検証中にエラー: {str(e)}")
+        return False
 
 def debug_teams_signature(request_data, teams_outgoing_token):
     """
@@ -163,14 +341,34 @@ def debug_teams_signature(request_data, teams_outgoing_token):
         ).decode('utf-8')
         results["base64"] = b64_signature
         
+        # 文字列そのままの場合
+        if isinstance(request_data, bytes):
+            str_data = request_data.decode('utf-8', errors='replace')
+        else:
+            str_data = request_data
+            
+        str_b64_signature = base64.b64encode(
+            hmac.new(
+                key=token_bytes,
+                msg=str_data.encode('utf-8'),
+                digestmod=hashlib.sha256
+            ).digest()
+        ).decode('utf-8')
+        results["string_base64"] = str_b64_signature
+        
         # JSON処理を試みる
         try:
-            json_data = json.loads(data_bytes)
+            if isinstance(request_data, bytes):
+                json_data = json.loads(request_data.decode('utf-8', errors='replace'))
+            else:
+                json_data = json.loads(request_data)
+                
             # 様々なJSON形式で試す
             json_formats = {
                 "compact": json.dumps(json_data, separators=(',', ':')),
+                "canonical": json.dumps(json_data, sort_keys=True, separators=(',', ':')),
                 "pretty": json.dumps(json_data, indent=2),
-                "no_spaces": json.dumps(json_data),
+                "no_spaces": re.sub(r'\s', '', json.dumps(json_data)),
                 "ascii": json.dumps(json_data, ensure_ascii=True)
             }
             
@@ -186,8 +384,22 @@ def debug_teams_signature(request_data, teams_outgoing_token):
             
             results["json"] = json_results
             
+            # body部分のみを使用した場合
+            if "body" in json_data:
+                body_json = json.dumps(json_data["body"], separators=(',', ':'))
+                body_bytes = body_json.encode('utf-8')
+                
+                results["body_only"] = {
+                    "hex": hmac.new(key=token_bytes, msg=body_bytes, digestmod=hashlib.sha256).hexdigest(),
+                    "base64": base64.b64encode(
+                        hmac.new(key=token_bytes, msg=body_bytes, digestmod=hashlib.sha256).digest()
+                    ).decode('utf-8')
+                }
+            
         except json.JSONDecodeError:
             results["json"] = "リクエストデータはJSON形式ではありません"
+        except Exception as json_err:
+            results["json_error"] = str(json_err)
         
     except Exception as e:
         results["error"] = str(e)
