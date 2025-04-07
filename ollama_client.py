@@ -1,4 +1,4 @@
-# ollama_client.py - Ollamaとの通信と応答生成（改善版）
+# ollama_client.py - Ollamaとの通信と応答生成（コンテンツベース回答改善版）
 import logging
 import requests
 import traceback
@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, onedrive_search=None):
     """
-    Ollamaを使用して回答を生成する（改善版）
+    Ollamaを使用して回答を生成する（コンテンツベース回答改善版）
 
     Args:
         query: ユーザーからの質問
@@ -31,7 +31,7 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
         # OneDrive検索が有効かつクエリがある場合は関連情報を検索
         onedrive_context = ""
         search_path = ""
-        search_result_count = 0
+        retrieved_files = []
         if onedrive_search and clean_query:
             # 検索ディレクトリのパスを取得（短縮表示用）
             search_path = onedrive_search.base_directory
@@ -45,16 +45,13 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
             try:
                 relevant_content = onedrive_search.get_relevant_content(clean_query)
                 
-                # 検索結果の件数を抽出
-                result_count_match = re.search(r'---\s+(\d+)件の関連ファイルが見つかりました', relevant_content)
-                if result_count_match:
-                    search_result_count = int(result_count_match.group(1))
+                # 関連ファイル情報の抽出（メタデータ表示用）
+                file_matches = re.findall(r'=== ファイル \d+: (.+?) ===\n更新日時: (.+?)\n', relevant_content)
+                retrieved_files = [{"name": name, "date": date} for name, date in file_matches]
                 
-                # 検索結果が見つかったかどうかを判定する条件を改善
-                # 「件の関連ファイルが見つかりました」または「=== ファイル」の文字列で判定
-                if search_result_count > 0 or "=== ファイル" in relevant_content:
-                    onedrive_context = f"\n\n参考資料（OneDriveから取得 - {short_path}）:\n{relevant_content}"
-                    logger.info(f"OneDriveから関連情報を取得: {len(onedrive_context)}文字, {search_result_count}件のファイル")
+                if relevant_content and "件の関連ファイルが見つかりました" in relevant_content:
+                    onedrive_context = relevant_content
+                    logger.info(f"OneDriveから関連情報を取得: {len(onedrive_context)}文字")
                 else:
                     # ファイルが見つからない場合は見つからないことを明示
                     if has_date:
@@ -65,15 +62,14 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                             month = date_match.group(2)
                             day = date_match.group(3)
                             date_str = f"{year}年{month}月{day}日"
-                            onedrive_context = f"\n\n注意: {date_str}の日報は検索ディレクトリ（{short_path}）から見つかりませんでした。"
+                            onedrive_context = f"注意: {date_str}の日報は検索ディレクトリ（{short_path}）から見つかりませんでした。"
                     else:
-                        onedrive_context = f"\n\n注意: 関連する日報ファイルは検索ディレクトリ（{short_path}）から見つかりませんでした。"
+                        onedrive_context = f"注意: 関連する日報ファイルは検索ディレクトリ（{short_path}）から見つかりませんでした。"
                     
                     logger.info("関連情報は見つかりませんでした")
             except Exception as e:
                 logger.error(f"OneDrive検索中にエラーが発生: {str(e)}")
-                logger.error(traceback.format_exc())
-                onedrive_context = f"\n\n注意: OneDriveでの検索中にエラーが発生しました。検索パス: {short_path}"
+                onedrive_context = f"注意: OneDriveでの検索中にエラーが発生しました。検索パス: {short_path}"
 
         # Ollamaとは何かを質問されているかを確認
         is_about_ollama = "ollama" in clean_query.lower() and ("とは" in clean_query or "什么" in clean_query or "what" in clean_query.lower())
@@ -90,26 +86,31 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 - Ollamaは大規模言語モデルをローカルで実行するためのツール
 - ローカルコンピュータでLlama、Mistral、Gemmaなどのモデルを実行できる
 - プライバシーを保ちながらAI機能を利用できる
-- APIを通じて他のアプリケーションから利用できる{onedrive_context}"""
+- APIを通じて他のアプリケーションから利用できる"""
         else:
             # 日報に関する質問の特別処理
-            if "日報" in clean_query and search_result_count > 0:
-                prompt = f"""以下の質問に日本語で丁寧に回答してください。
+            if "日報" in clean_query and onedrive_context and "件の関連ファイルが見つかりました" in onedrive_context:
+                prompt = f"""以下の質問に、提供された資料の内容に基づいて具体的に回答してください。
 
 質問: {clean_query}
 
+### 参考資料:
 {onedrive_context}
 
-上記の参考資料を基に日報の内容を詳細かつ具体的に要約して回答してください。以下の点を含めてください：
-1. 日報に記載されている主な活動内容や進捗状況を具体的に説明
-2. 会議や打ち合わせがあれば、その目的と主な議題・決定事項
-3. 重要なタスクや課題、解決策についての情報
-4. 記載されている日付、時間、関係者、部署名などの詳細情報
-5. 数値データや成果物があれば具体的に言及
+### 指示:
+1. 上記の参考資料を精査し、質問に関連する具体的な情報を探してください。
+2. 資料から得られる事実のみに基づいて回答を作成してください。
+3. 日報の内容を詳細に分析し、質問に関連する重要な情報を抽出してください。
+4. 以下の形式で回答を構成してください:
+   - まず質問に対する直接的な回答を簡潔に示す
+   - 次に参考資料から見つかった具体的な詳細情報を提示する
+   - 情報源として参照したファイル名と日付を明記する
+5. 資料に情報がない場合は、「資料には記載がありません」と明示してください。
+6. 推測や一般的な知識による補完は行わず、資料に記載されている事実のみを使用してください。
 
-参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください。
-読みやすく構造化された形式で回答を提供してください。"""
-            elif "日報" in clean_query and not search_result_count > 0:
+重要: 回答は「参考資料:」や「指示:」などの見出しを含めず、通常の文章形式で提供してください。また、資料に記載されていないことは推測せずに、「この点については資料に記載がありません」と正直に伝えてください。"""
+
+            elif "日報" in clean_query and not ("件の関連ファイルが見つかりました" in onedrive_context):
                 # 日報が見つからない場合
                 date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
                 if date_match:
@@ -138,22 +139,45 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 ご質問の日報データは検索ディレクトリ（{short_path}）から見つかりませんでした。具体的な日付（例：2024年10月26日）を指定すると検索できる可能性があります。
 日報検索には、年月日を含めた形で質問していただくとより正確に検索できます。"""
             else:
-                # 一般的な質問と検索結果がある場合
-                if search_result_count > 0:
+                # OneDriveコンテキストを含むプロンプト
+                if onedrive_context and "件の関連ファイルが見つかりました" in onedrive_context:
+                    # ファイルのメタデータ情報を追加
+                    file_info = ""
+                    if retrieved_files:
+                        file_info = "検索結果ファイル一覧:\n"
+                        for i, file in enumerate(retrieved_files):
+                            file_info += f"{i+1}. {file['name']} (更新: {file['date']})\n"
+                    
+                    prompt = f"""以下の質問に対して、提供された資料の内容に基づいて詳細かつ具体的に回答してください。
+
+質問: {clean_query}
+
+{file_info}
+
+### 参考資料:
+{onedrive_context}
+
+### 指示:
+1. 上記の参考資料を詳細に分析し、質問に対する適切な情報を抽出してください。
+2. 資料から得られる具体的な事実に基づいて回答を作成してください。
+3. 重要な情報、具体的な数字、日付、名前などの詳細を正確に引用してください。
+4. 回答には以下の内容を含めてください:
+   - 質問への直接的な回答
+   - 参考資料から抽出した関連する重要な詳細情報
+   - 必要に応じて、情報の出典となったファイル名
+5. 資料に記載されていない情報については、「この点については資料に記載がありません」と明示してください。
+
+回答は「参考資料:」や「指示:」などの見出しを含めず、自然な文章形式で提供してください。資料に基づく具体的な情報を重視し、推測は最小限に抑えてください。"""
+                elif onedrive_context:
+                    # 検索結果がない場合のプロンプト
                     prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
 {onedrive_context}
 
-上記の参考資料を基に詳細かつ具体的に回答してください。以下の点に注意してください：
-1. 参考資料の内容を要約して説明してください
-2. 重要なポイント、データ、情報を具体的に含めてください
-3. 関連する日付、数値、名前などの詳細情報も含めてください
-4. 参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください
-5. 読みやすく構造化された形式で回答を提供してください"""
+上記の注意事項を踏まえて、あなたの知識に基づいて質問に回答してください。"""
                 else:
-                    # OneDriveコンテキストがない場合は単純なプロンプト
                     prompt = clean_query
 
         # Ollamaへのリクエストを構築（パラメータを調整）
@@ -189,28 +213,31 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                 # レスポンスが空でないことを確認
                 if not generated_text.strip():
                     generated_text = "申し訳ありませんが、有効な回答を生成できませんでした。"
-
-                # 検索結果の情報を追加
-                if onedrive_search and search_result_count > 0:
-                    # generated_textの先頭に検索結果の情報を追加
-                    search_info = f"【検索結果: {search_result_count}件のファイルが見つかりました】\n\n"
-                    generated_text = search_info + generated_text
+                    
+                # 検索したファイル情報を最後に追加（あれば）
+                if retrieved_files and not is_about_ollama:
+                    source_info = "\n\n[参照ファイル情報]\n"
+                    for i, file in enumerate(retrieved_files[:5]):  # 最大5件まで表示
+                        source_info += f"・{file['name']} (更新: {file['date']})\n"
+                    
+                    # 参照情報を回答の最後に追加
+                    generated_text += source_info
 
                 logger.info("回答が正常に生成されました")
                 return generated_text
 
             else:
                 # エラーが発生した場合のフォールバック応答
-                return get_fallback_response(clean_query, is_about_ollama, search_path, search_result_count)
+                return get_fallback_response(clean_query, is_about_ollama, search_path)
 
         except requests.exceptions.Timeout:
             logger.error("Ollamaリクエストがタイムアウトしました")
             # タイムアウト時のフォールバック応答
-            return get_fallback_response(clean_query, is_about_ollama, search_path, search_result_count)
+            return get_fallback_response(clean_query, is_about_ollama, search_path)
 
         except requests.exceptions.ConnectionError:
             logger.error("Ollamaサーバーに接続できませんでした")
-            return get_fallback_response(clean_query, is_about_ollama, search_path, search_result_count)
+            return get_fallback_response(clean_query, is_about_ollama, search_path)
 
     except Exception as e:
         logger.error(f"回答生成中にエラーが発生しました: {str(e)}")
@@ -261,7 +288,7 @@ def get_shortened_path(path):
     
     return path
 
-def get_fallback_response(query, is_about_ollama=False, search_path="", search_result_count=0):
+def get_fallback_response(query, is_about_ollama=False, search_path=""):
     """
     タイムアウトやエラー時に使用するフォールバック応答を返す
 
@@ -269,21 +296,11 @@ def get_fallback_response(query, is_about_ollama=False, search_path="", search_r
         query: ユーザーの質問
         is_about_ollama: Ollamaに関する質問かどうか
         search_path: 検索したパス
-        search_result_count: 検索結果の件数
 
     Returns:
         フォールバック応答
     """
     short_path = get_shortened_path(search_path)
-    
-    # 検索結果があるが応答生成に失敗した場合
-    if search_result_count > 0:
-        return f"""【検索結果: {search_result_count}件のファイルが見つかりました】
-
-申し訳ありませんが、Ollamaサーバーからの応答に問題が発生しました。検索は成功しましたが、回答の生成に失敗しました。
-時間をおいて再度お試しいただくか、別の質問方法をお試しください。
-
-検索ディレクトリ: {short_path}"""
     
     if is_about_ollama:
         return """Ollamaは、大規模言語モデル（LLM）をローカル環境で実行するためのオープンソースフレームワークです。
