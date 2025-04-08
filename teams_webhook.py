@@ -1,4 +1,4 @@
-# teams_webhook.py - Logic Apps Workflowに対応した通知機能（改善版）
+# teams_webhook.py - Logic Apps Workflowに対応した通知機能（エラー修正版）
 import requests
 import logging
 import json
@@ -41,68 +41,13 @@ class TeamsWebhook:
             # 現在の日時
             now = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
             
-            # デバッグ用に詳細ログを追加
-            logger.info(f"Teams Webhook URL: {self.webhook_url[:30]}...")
+            # ログに回答長を出力
             logger.info(f"短縮パス: {short_path}")
             logger.info(f"回答長: {len(response)} 文字")
-            
-            # 'attachments'配列が直接ルートレベルにある形式
-            root_attachments_payload = {
-                "attachments": [
-                    {
-                        "contentType": "application/vnd.microsoft.card.adaptive",
-                        "content": {
-                            "type": "AdaptiveCard",
-                            "body": [
-                                {
-                                    "type": "TextBlock",
-                                    "size": "Medium",
-                                    "weight": "Bolder",
-                                    "text": "Ollama回答",
-                                    "wrap": True
-                                },
-                                {
-                                    "type": "TextBlock",
-                                    "text": f"質問: {query}",
-                                    "wrap": True,
-                                    "weight": "Bolder",
-                                    "color": "Accent"
-                                },
-                                {
-                                    "type": "TextBlock",
-                                    "text": f"検索対象: {short_path}",
-                                    "wrap": True,
-                                    "isSubtle": True,
-                                    "size": "Small"
-                                },
-                                {
-                                    "type": "TextBlock",
-                                    "text": response,
-                                    "wrap": True,
-                                    "spacing": "Medium"
-                                },
-                                {
-                                    "type": "TextBlock",
-                                    "text": f"回答生成時刻: {now}",
-                                    "wrap": True,
-                                    "size": "Small",
-                                    "isSubtle": True
-                                }
-                            ],
-                            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                            "version": "1.0"
-                        }
-                    }
-                ]
-            }
+            logger.info(f"Teams通知送信を開始します")
 
-            # バックアップ用のシンプルなペイロード - より信頼性の高いマークダウン形式
-            simple_payload = {
-                "text": f"### Ollama回答\n\n**質問**: {query}\n\n**検索対象**: {short_path}\n\n{response}\n\n*回答生成時刻: {now}*"
-            }
-
-            # 旧形式のペイロード（既存形式）
-            legacy_payload = {
+            # 主要なペイロード - Power Automateに適した形式
+            main_payload = {
                 "body": {
                     "attachments": [
                         {
@@ -121,18 +66,21 @@ class TeamsWebhook:
                                         "type": "TextBlock",
                                         "text": f"質問: {query}",
                                         "wrap": True,
-                                        "weight": "Bolder"
+                                        "weight": "Bolder",
+                                        "color": "Accent"
                                     },
                                     {
                                         "type": "TextBlock",
                                         "text": f"検索対象: {short_path}",
                                         "wrap": True,
+                                        "isSubtle": True,
                                         "size": "Small"
                                     },
                                     {
                                         "type": "TextBlock",
                                         "text": response,
-                                        "wrap": True
+                                        "wrap": True,
+                                        "spacing": "Medium"
                                     },
                                     {
                                         "type": "TextBlock",
@@ -155,76 +103,71 @@ class TeamsWebhook:
                 'Content-Type': 'application/json'
             }
 
-            # 各ペイロード形式の試行ログを出力
-            logger.info("Teams通知送信を開始します")
-            
-            # シンプル形式での送信（最も確実なため、最初に試行）
-            logger.debug(f"Logic Apps送信ペイロード(シンプル): {json.dumps(simple_payload)[:300]}...")
-
-            try:
-                r3 = requests.post(
-                    self.webhook_url, 
-                    json=simple_payload, 
-                    headers=headers,
-                    timeout=30
-                )
-                logger.debug(f"Logic Apps応答(シンプル): {r3.status_code}, {r3.text[:100] if r3.text else '空のレスポンス'}")
-                logger.info(f"Logic Apps応答詳細: ステータス={r3.status_code}, ヘッダー={dict(r3.headers)}")
-                
-                if r3.status_code >= 200 and r3.status_code < 300:
-                    logger.info(f"シンプル形式でのLogic Apps通知送信成功: {r3.status_code}")
-                    return {"status": "success", "code": r3.status_code, "format": "シンプル"}
-                else:
-                    logger.warning(f"シンプル形式での送信失敗: {r3.status_code}。ルートレベル形式で再試行します。")
-
-            except Exception as e3:
-                logger.error(f"シンプル形式送信エラー: {str(e3)}")
-                logger.error(traceback.format_exc())
-
-            # 1. ルートレベルのattachments形式で試行
-            logger.debug(f"Logic Apps送信ペイロード(ルートレベルattachments): {json.dumps(root_attachments_payload)[:300]}...")
+            # メインペイロードで送信
+            logger.debug(f"Logic Apps送信ペイロード: {json.dumps(main_payload)[:300]}...")
 
             try:
                 r = requests.post(
                     self.webhook_url, 
-                    json=root_attachments_payload, 
+                    json=main_payload, 
                     headers=headers,
                     timeout=30
                 )
-                logger.debug(f"Logic Apps応答(ルートレベルattachments): {r.status_code}, {r.text[:100] if r.text else '空のレスポンス'}")
+                logger.debug(f"Logic Apps応答: {r.status_code}, {r.text[:100] if r.text else '空のレスポンス'}")
+                logger.debug(f"Logic Apps応答ヘッダー: {dict(r.headers)}")
+                logger.info(f"Logic Apps応答詳細: ステータス={r.status_code}, ヘッダー={dict(r.headers)}")
 
                 if r.status_code >= 200 and r.status_code < 300:
-                    logger.info(f"ルートレベルattachments形式でのLogic Apps通知送信成功: {r.status_code}")
-                    return {"status": "success", "code": r.status_code, "format": "ルートレベルattachments"}
+                    logger.info(f"Logic Apps通知送信成功: {r.status_code}")
+                    return {"status": "success", "code": r.status_code, "format": "標準"}
                 else:
-                    logger.warning(f"ルートレベルattachments形式での送信失敗: {r.status_code}。従来形式で再試行します。")
+                    # エラー発生時はフォールバックのシンプルな形式を試す
+                    logger.warning(f"メインフォーマットでの送信失敗: {r.status_code}。シンプル形式で再試行します。")
+                    logger.error(f"エラーレスポンス: {r.text}")
+                    
+                    # シンプルなフォールバックペイロード - テキストのみだが、attachments構造は維持
+                    fallback_payload = {
+                        "body": {
+                            "attachments": [
+                                {
+                                    "contentType": "application/vnd.microsoft.card.adaptive",
+                                    "content": {
+                                        "type": "AdaptiveCard",
+                                        "body": [
+                                            {
+                                                "type": "TextBlock",
+                                                "text": f"### Ollama回答\n\n**質問**: {query}\n\n**検索対象**: {short_path}\n\n{response}\n\n*回答生成時刻: {now}*",
+                                                "wrap": True
+                                            }
+                                        ],
+                                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                                        "version": "1.0"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                    
+                    logger.debug(f"フォールバックペイロード: {json.dumps(fallback_payload)[:300]}...")
+                    
+                    r2 = requests.post(
+                        self.webhook_url, 
+                        json=fallback_payload, 
+                        headers=headers,
+                        timeout=30
+                    )
+                    
+                    if r2.status_code >= 200 and r2.status_code < 300:
+                        logger.info(f"フォールバック形式でのLogic Apps通知送信成功: {r2.status_code}")
+                        return {"status": "success", "code": r2.status_code, "format": "フォールバック"}
+                    else:
+                        logger.error(f"Logic Apps通知の送信に全て失敗しました: 最終ステータスコード={r2.status_code}")
+                        logger.error(f"完全なエラーレスポンス: {r2.text}")
+                        return {"status": "error", "code": r2.status_code, "message": r2.text}
 
             except Exception as e:
-                logger.warning(f"ルートレベルattachments形式送信エラー: {str(e)}。従来形式で再試行します。")
-
-            # 2. 従来形式で試行
-            logger.debug(f"Logic Apps送信ペイロード(従来形式): {json.dumps(legacy_payload)[:300]}...")
-
-            try:
-                r2 = requests.post(
-                    self.webhook_url, 
-                    json=legacy_payload, 
-                    headers=headers,
-                    timeout=30
-                )
-                logger.debug(f"Logic Apps応答(従来形式): {r2.status_code}, {r2.text[:100] if r2.text else '空のレスポンス'}")
-
-                if r2.status_code >= 200 and r2.status_code < 300:
-                    logger.info(f"従来形式でのLogic Apps通知送信成功: {r2.status_code}")
-                    return {"status": "success", "code": r2.status_code, "format": "従来形式"}
-                else:
-                    logger.warning(f"従来形式での送信失敗: {r2.status_code}。")
-                    logger.error(f"Logic Apps通知の送信に全て失敗しました: 最終ステータスコード={r2.status_code}")
-                    return {"status": "error", "code": r2.status_code, "message": r2.text}
-
-            except Exception as e2:
-                logger.error(f"従来形式送信エラー: {str(e2)}")
-                return {"status": "error", "message": str(e2)}
+                logger.error(f"Logic Apps通知送信エラー: {str(e)}")
+                return {"status": "error", "message": str(e)}
 
         except Exception as e:
             logger.error(f"Logic Apps通知の送信中にエラーが発生しました: {str(e)}")
