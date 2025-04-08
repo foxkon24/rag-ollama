@@ -1,4 +1,4 @@
-# onedrive_search.py - OneDriveファイル検索機能（日本語対応改善版2.0）
+# onedrive_search.py - OneDriveファイル検索機能（日本語対応改善版）
 import os
 import logging
 import subprocess
@@ -60,33 +60,9 @@ class OneDriveSearch:
         self.search_cache = {}
         self.cache_expiry = 300  # キャッシュの有効期限（秒）
 
-    def get_fiscal_year_folder(self, year, month):
-        """
-        指定された年月から日本の年度フォルダを推測する
-        4月始まりの年度を想定
-
-        Args:
-            year: 年（文字列または数値）
-            month: 月（文字列または数値）
-
-        Returns:
-            str: 年度フォルダ名（例: "2024年度"）
-        """
-        # 文字列を数値に変換
-        year_num = int(year)
-        month_num = int(month)
-        
-        # 4月以降は当年度、3月以前は前年度
-        if month_num >= 4:
-            fiscal_year = str(year_num)
-        else:
-            fiscal_year = str(year_num - 1)
-        
-        return fiscal_year + "年度"
-
     def search_files(self, keywords, file_types=None, max_results=None, use_cache=True):
         """
-        OneDrive内のファイルをキーワードで検索 (改善版)
+        OneDrive内のファイルをキーワードで検索
 
         Args:
             keywords: 検索キーワード（文字列またはリスト）
@@ -134,26 +110,10 @@ class OneDriveSearch:
                     year = date_match.group(1)
                     month = date_match.group(2).zfill(2)  # 1桁の月を2桁に
                     day = date_match.group(3).zfill(2)    # 1桁の日を2桁に
-                    
-                    # 様々な日付形式を追加
                     date_pattern = f"{year}{month}{day}"
                     date_pattern2 = f"{year}-{month}-{day}"
                     date_pattern3 = f"{year}/{month}/{day}"
-                    
-                    # ファイル名パターンに対応（_YYYYMMDD）
-                    file_date_pattern = f"_{year}{month}{day}"
-                    
-                    date_keywords.extend([
-                        date_pattern, 
-                        date_pattern2, 
-                        date_pattern3,
-                        file_date_pattern
-                    ])
-                    
-                    # さらに年度フォルダも考慮
-                    fiscal_year = self.get_fiscal_year_folder(year, month)
-                    if fiscal_year not in date_keywords:
-                        date_keywords.append(fiscal_year)
+                    date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
             else:
                 # 日本語検索キーワードは短くして検索精度を上げる
                 if len(k) > 2 and re.search(r'[ぁ-んァ-ン一-龥]', k):
@@ -192,39 +152,18 @@ class OneDriveSearch:
             date_conditions = []
             keyword_conditions = []
 
-            # 日付パターンの検索条件（改善版）
+            # 日付パターンの検索条件
             for date_key in date_keywords:
-                # 特殊な処理が必要なYYYYMMDD形式の場合
+                # ファイル名に日付が含まれるかより柔軟に検索
+                date_conditions.append(f"$_.Name -like '*{date_key}*' -or $_.Name -match '{date_key}'")
+                
+                # 日付フォルダ構造にも対応（例：2023/10/26 や 2023-10-26 のようなフォルダ）
                 if len(date_key) == 8 and date_key.isdigit():  # YYYYMMDD形式
                     year = date_key[:4]
                     month = date_key[4:6]
                     day = date_key[6:8]
-                    
-                    # ファイル名に日付が含まれるかより柔軟に検索
-                    date_conditions.append(f"$_.Name -like '*{date_key}*'")
-                    
-                    # ファイル名パターン(_YYYYMMDD)に対応
-                    date_conditions.append(f"$_.Name -like '*_{date_key}*'")
-                    
-                    # 日付フォルダ構造にも対応（例：2023/10/26 や 2023-10-26 のようなフォルダ）
                     date_folder_pattern = f"*\\\\{year}*\\\\{month}*\\\\{day}*"
                     date_conditions.append(f"$_.FullName -like '{date_folder_pattern}'")
-                    
-                    # 年度フォルダにも対応
-                    fiscal_year = self.get_fiscal_year_folder(year, month)
-                    date_conditions.append(f"$_.FullName -like '*{fiscal_year}*'")
-                
-                # _YYYYMMDD パターン
-                elif date_key.startswith('_') and len(date_key) == 9 and date_key[1:].isdigit():
-                    date_conditions.append(f"$_.Name -like '*{date_key}*'")
-                
-                # 年度フォルダパターン
-                elif "年度" in date_key:
-                    date_conditions.append(f"$_.FullName -like '*{date_key}*'")
-                    
-                # その他の日付パターン
-                else:
-                    date_conditions.append(f"$_.Name -like '*{date_key}*' -or $_.Name -match '{date_key}'")
 
             # 通常キーワードの検索条件
             for term in search_terms:
@@ -356,61 +295,6 @@ class OneDriveSearch:
             logger.error(f"詳細: {str(e.__class__.__name__)}")
             return []
 
-    def debug_search(self, query):
-        """
-        検索デバッグ情報を出力
-
-        Args:
-            query: 検索クエリ
-            
-        Returns:
-            dict: デバッグ情報
-        """
-        debug_info = {"search_patterns": [], "results": {}}
-        logger.debug(f"=== 検索デバッグ開始: {query} ===")
-        
-        # 日付抽出
-        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
-        if date_match:
-            year = date_match.group(1)
-            month = date_match.group(2).zfill(2)
-            day = date_match.group(3).zfill(2)
-            
-            # 様々な日付パターンを生成
-            patterns = [
-                f"{year}{month}{day}",  # YYYYMMDD
-                f"_{year}{month}{day}",  # _YYYYMMDD
-                f"{year}-{month}-{day}",  # YYYY-MM-DD
-                f"{year}/{month}/{day}",  # YYYY/MM/DD
-                f"{year}年{month}月{day}日",  # YYYY年MM月DD日
-                self.get_fiscal_year_folder(year, month)  # YYYY年度
-            ]
-            
-            debug_info["search_patterns"] = patterns
-            
-            # 各パターンで検索を試行
-            for pattern in patterns:
-                logger.debug(f"パターン '{pattern}' で検索:")
-                # PowerShell で直接ファイル検索を実行
-                ps_command = f"""
-                Get-ChildItem -Path "{self.base_directory}" -Recurse -File | 
-                Where-Object {{ $_.Name -like "*{pattern}*" -or $_.FullName -like "*{pattern}*" }} | 
-                Select-Object -First 3 | 
-                ForEach-Object {{ $_.FullName }}
-                """
-                
-                # コマンド実行結果を表示
-                try:
-                    result = subprocess.check_output(["powershell", "-Command", ps_command], text=True)
-                    logger.debug(f"検索結果:\n{result}")
-                    debug_info["results"][pattern] = result.splitlines() if result.strip() else []
-                except Exception as e:
-                    logger.debug(f"検索エラー: {str(e)}")
-                    debug_info["results"][pattern] = f"エラー: {str(e)}"
-        
-        logger.debug("=== 検索デバッグ終了 ===")
-        return debug_info
-
     def read_file_content(self, file_path):
         """
         ファイルの内容を読み込む
@@ -517,26 +401,96 @@ class OneDriveSearch:
 
     def _extract_pdf_content(self, file_path):
         """
-        PDFファイルからテキストを抽出する（簡易版）
+        PDFファイルからテキストを抽出する（改善版）
         """
-        cmd = f"""
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        # ファイル情報を取得するPowerShellコマンド
+        info_cmd = f"""
+        $OutputEncoding = [System.Text.Encoding]::UTF8
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         try {{
             # ファイルの存在確認
             if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "PDF名: {os.path.basename(file_path)}"
+                "PDF名: " + [System.IO.Path]::GetFileName("{file_path}")
                 "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
                 "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
                 "----------------------------------------"
-                "このPDFからテキスト抽出はサポートされていません"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
+                exit
             }}
         }} catch {{
             "エラーが発生しました: $_"
         }}
         """
-        return self._extract_file_content_helper(file_path, cmd)
+        
+        # ファイル情報を取得
+        file_info = self._extract_file_content_helper(file_path, info_cmd)
+        
+        # PowerShellを使ってPDFテキスト抽出を試みる（方法1）
+        extract_cmd1 = f"""
+        $OutputEncoding = [System.Text.Encoding]::UTF8
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        try {{
+            # Word Interopが利用可能かチェック
+            $wordInstalled = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+            if (Test-Path (Join-Path $wordInstalled "Microsoft.Office.Interop.Word.dll")) {{
+                "Microsoft Wordを使用してPDFテキストを抽出しています..."
+                Add-Type -AssemblyName "Microsoft.Office.Interop.Word"
+                $word = New-Object -ComObject Word.Application
+                $word.Visible = $false
+                $doc = $word.Documents.Open("{file_path}", $false, $true)
+                $text = $doc.Content.Text
+                $doc.Close()
+                $word.Quit()
+                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word)
+                $text
+            }} else {{
+                # PowerShell 5.1以降でSystem.Text.Encoding.CodePagesを試す
+                try {{
+                    Add-Type -AssemblyName System.Text.Encoding.CodePages
+                    [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
+                    "iTextSharpを試みています..."
+                    # バイナリデータを最大1000文字まで出力
+                    $bytes = [System.IO.File]::ReadAllBytes("{file_path}")
+                    $hexOutput = [System.BitConverter]::ToString($bytes[0..100]) -replace "-", " "
+                    "PDF先頭バイナリ: $hexOutput"
+                    "PDFからのテキスト抽出はこのメソッドではサポートされていません。"
+                }} catch {{
+                    "PDFからのテキスト抽出がサポートされていません。"
+                }}
+            }}
+        }} catch {{
+            "PDFテキスト抽出中にエラーが発生しました: $_"
+        }}
+        """
+        
+        # 抽出を試みる
+        extract_result = self._extract_file_content_helper(file_path, extract_cmd1)
+        
+        # 抽出結果をチェック
+        if "PDFからのテキスト抽出はサポートされていません" in extract_result or extract_result.strip() == "":
+            # このファイルが存在することを明示するメッセージを追加
+            date_match = re.search(r'_(\d{8})\.pdf', file_path)
+            if date_match:
+                date_str = date_match.group(1)
+                year = date_str[:4]
+                month = date_str[4:6]
+                day = date_str[6:8]
+                
+                # ファイルは見つかったことを示すメッセージを作成
+                file_found_message = f"""
+【重要】{year}年{month}月{day}日の日報ファイルは存在しています。
+ファイル名: {os.path.basename(file_path)}
+場所: {os.path.dirname(file_path)}
+ファイルサイズ: {os.path.getsize(file_path)} bytes
+最終更新日時: {datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%Y-%m-%d %H:%M:%S')}
+
+このPDFファイルの内容を直接表示することはできませんが、ファイルは確かに存在しています。
+内容を確認するには、上記のファイルパスからPDFを直接開いてください。
+"""
+                return file_info + "\n\n" + file_found_message
+        
+        return file_info + "\n\n" + extract_result
 
     def _extract_word_content(self, file_path):
         """
@@ -605,55 +559,80 @@ class OneDriveSearch:
         """
         return self._extract_file_content_helper(file_path, cmd)
 
-    def get_relevant_content_with_multiple_keywords(self, keywords, max_files=None, max_chars=8000):
+    def get_relevant_content(self, query, max_files=None, max_chars=8000):
         """
-        複数のキーワードを使用して関連コンテンツを取得する（新機能）
+        クエリに関連する内容を取得
 
         Args:
-            keywords: 検索キーワードのリスト
+            query: 検索クエリ
             max_files: 取得する最大ファイル数
             max_chars: 取得する最大文字数
 
         Returns:
             関連コンテンツ（文字列）
         """
+        # 最大ファイル数の設定
         if max_files is None:
             max_files = self.max_results
 
-        # 複数のキーワードで検索を実行
-        all_results = []
-        for keyword in keywords:
-            results = self.search_files([keyword], max_results=max_files)
-            all_results.extend(results)
+        # 日付を抽出（YYYY年MM月DD日）
+        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+        date_str = None
 
-        # 重複を除去（パスで判断）
-        unique_results = []
-        unique_paths = set()
-        for result in all_results:
-            path = result.get('path')
-            if path and path not in unique_paths:
-                unique_paths.add(path)
-                unique_results.append(result)
+        if date_match:
+            year = date_match.group(1)
+            month = date_match.group(2).zfill(2)
+            day = date_match.group(3).zfill(2)
+            date_str = f"{year}年{month}月{day}日"
+            date_pattern = f"{year}{month}{day}"
+            logger.info(f"日付指定を検出: {date_str} (パターン: {date_pattern})")
 
-        # 結果がない場合
-        if not unique_results:
-            keywords_str = ", ".join(str(k) for k in keywords if k)
-            return f"キーワード '{keywords_str}' に関連するファイルは見つかりませんでした。"
+        # 検索クエリからストップワードを除去
+        stop_words = ["について", "とは", "の", "を", "に", "は", "で", "が", "と", "から", "へ", "より", 
+                     "内容", "知りたい", "あったのか", "何", "教えて", "どのような", "どんな", "ありました",
+                     "the", "a", "an", "and", "or", "of", "to", "in", "for", "on", "by"]
 
-        # 結果を処理
-        return self._process_search_results(unique_results[:max_files], max_chars)
+        # クエリから重要な単語を抽出
+        keywords = []
 
-    def _process_search_results(self, search_results, max_chars=8000):
-        """
-        検索結果を処理して関連コンテンツを取得する内部メソッド
+        # 先に日付を追加（もし存在すれば）
+        if date_str:
+            keywords.append(date_str)
 
-        Args:
-            search_results: 検索結果のリスト
-            max_chars: 最大文字数
+        # その他のキーワードを追加
+        for word in query.split():
+            clean_word = word.strip(',.;:!?()[]{}"\'')
+            if clean_word and len(clean_word) > 1 and clean_word.lower() not in stop_words:
+                # 日付文字列の一部でなければ追加
+                if date_str and date_str not in clean_word:
+                    keywords.append(clean_word)
+                elif not date_str:
+                    keywords.append(clean_word)
+                else:
+                    pass
 
-        Returns:
-            str: 関連コンテンツ
-        """
+        # キーワードが少なすぎる場合のバックアップとして日報関連の単語を追加
+        if len(keywords) < 2:
+            if "日報" not in query.lower() and not any(k for k in keywords if "日報" in k):
+                keywords.append("日報")
+
+        if not keywords:
+            return "検索キーワードが見つかりませんでした。具体的な日付や単語で検索してください。"
+
+        logger.info(f"抽出されたキーワード: {keywords}")
+
+        # ファイル検索
+        search_results = self.search_files(keywords, max_results=max_files)
+
+        if not search_results:
+            keywords_str = ", ".join(keywords)
+            # 日付指定がある場合は特別なメッセージ
+            if date_str:
+                return f"{date_str}の日報は見つかりませんでした。日付の表記が正しいか確認してください。"
+            else:
+                return f"キーワード '{keywords_str}' に関連するファイルは見つかりませんでした。"
+
+        # 関連コンテンツの取得
         relevant_content = f"--- {len(search_results)}件の関連ファイルが見つかりました ---\n\n"
         total_chars = len(relevant_content)
 
@@ -688,3 +667,22 @@ class OneDriveSearch:
             total_chars += len(file_content)
 
         return relevant_content
+
+# 使用例
+if __name__ == "__main__":
+    # ロギングの設定
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    # インスタンス作成
+    onedrive_search = OneDriveSearch()
+
+    # 検索クエリ
+    test_query = "2024年10月26日の日報内容"
+
+    # 関連コンテンツを取得
+    content = onedrive_search.get_relevant_content(test_query)
+
+    print(f"検索結果: {content[:500]}...")  # 最初の500文字のみ表示

@@ -1,11 +1,41 @@
-# ollama_client.py - Ollamaとの通信と応答生成（日本語クエリ改善版2.0）
+# ollama_client.py - Ollamaとの通信と応答生成（日本語クエリ改善版）
 import logging
 import requests
 import traceback
 import re
 import os
+import sys
 
 logger = logging.getLogger(__name__)
+
+def clean_response_text(text):
+    """
+    Ollamaからの応答テキストをクリーニングして文字化けを修正
+    
+    Args:
+        text: 生のレスポンステキスト
+        
+    Returns:
+        クリーニングされたテキスト
+    """
+    # 韓国語の「없습니다」を「ありません」に置換
+    text = text.replace("없습니다", "ありません")
+    
+    # その他の非ASCII文字をチェック
+    import re
+    
+    # 日本語、英数字、一般的な記号以外の文字を検出
+    strange_chars = re.findall(r'[^\u0000-\u007F\u3000-\u30FF\u4E00-\u9FFF\u3040-\u309F\uFF00-\uFFEF\s.,!?;:()\[\]{}\'\"。、！？「」『』（）［］｛｝＜＞・…ー－]', text)
+    
+    if strange_chars:
+        logger.warning(f"レスポンステキストに不明な文字が含まれています: {set(strange_chars)}")
+        
+        # 不明な文字を空白に置換
+        for char in set(strange_chars):
+            if char != " ":  # 空白は保持
+                text = text.replace(char, " ")
+    
+    return text
 
 def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, onedrive_search=None):
     """
@@ -37,48 +67,12 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
             short_path = get_shortened_path(search_path)
             
             # 日付を含むかどうかを確認（日報検索に重要）
-            date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
-            has_date = bool(date_match)
-            
-            # 日付の詳細を抽出
-            date_specific_keywords = []
-            if has_date:
-                year = date_match.group(1)
-                month = date_match.group(2).zfill(2)
-                day = date_match.group(3).zfill(2)
-                
-                # 様々な日付形式を追加
-                date_pattern = f"{year}{month}{day}"  # YYYYMMDD
-                file_date_pattern = f"_{year}{month}{day}"  # _YYYYMMDD（ファイル名パターン）
-                date_str = f"{year}年{month}月{day}日"
-                
-                # 年度フォルダも考慮
-                fiscal_year = onedrive_search.get_fiscal_year_folder(year, month)
-                
-                date_specific_keywords = [
-                    date_pattern,
-                    file_date_pattern,
-                    date_str,
-                    fiscal_year
-                ]
-                
-                logger.info(f"日付特化検索キーワード: {date_specific_keywords}")
+            has_date = bool(re.search(r'\d{4}年\d{1,2}月\d{1,2}日', clean_query))
             
             # OneDriveから関連情報を取得
             logger.info(f"OneDriveから関連情報を検索: {clean_query} (日付指定: {has_date})")
             try:
-                # 日付特化検索を実行
-                if has_date and date_specific_keywords:
-                    # デバッグ情報を収集
-                    debug_info = onedrive_search.debug_search(clean_query)
-                    logger.debug(f"検索デバッグ情報: {debug_info}")
-                    
-                    # 複数キーワードで検索
-                    relevant_content = onedrive_search.get_relevant_content_with_multiple_keywords(date_specific_keywords)
-                else:
-                    # 通常検索
-                    relevant_content = onedrive_search.get_relevant_content(clean_query)
-                
+                relevant_content = onedrive_search.get_relevant_content(clean_query)
                 if relevant_content and "件の関連ファイルが見つかりました" in relevant_content:
                     onedrive_context = f"\n\n参考資料（OneDriveから取得 - {short_path}）:\n{relevant_content}"
                     logger.info(f"OneDriveから関連情報を取得: {len(onedrive_context)}文字")
@@ -92,37 +86,19 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                             month = date_match.group(2)
                             day = date_match.group(3)
                             date_str = f"{year}年{month}月{day}日"
-                            fiscal_year = onedrive_search.get_fiscal_year_folder(year, month)
                             onedrive_context = f"\n\n注意: {date_str}の日報は検索ディレクトリ（{short_path}）から見つかりませんでした。"
-                            
-                            # 検索結果がない場合、ディレクトリ内のファイル例を表示
-                            try:
-                                logger.info(f"年度フォルダを確認: {fiscal_year}")
-                                ps_command = f"""
-                                Get-ChildItem -Path "{search_path}" -Recurse -Filter "*{fiscal_year}*" -Directory | 
-                                Select-Object -First 1 -ExpandProperty FullName | ForEach-Object {{
-                                    Get-ChildItem -Path $_ -File | Select-Object -First 5 | ForEach-Object {{ $_.Name }}
-                                }}
-                                """
-                                
-                                sample_files = subprocess.check_output(["powershell", "-Command", ps_command], text=True).strip()
-                                if sample_files:
-                                    onedrive_context += f"\n\n{fiscal_year}フォルダ内のファイル例:\n{sample_files}"
-                            except:
-                                pass
                     else:
                         onedrive_context = f"\n\n注意: 関連する日報ファイルは検索ディレクトリ（{short_path}）から見つかりませんでした。"
                     
                     logger.info("関連情報は見つかりませんでした")
             except Exception as e:
                 logger.error(f"OneDrive検索中にエラーが発生: {str(e)}")
-                logger.error(traceback.format_exc())
                 onedrive_context = f"\n\n注意: OneDriveでの検索中にエラーが発生しました。検索パス: {short_path}"
 
         # Ollamaとは何かを質問されているかを確認
         is_about_ollama = "ollama" in clean_query.lower() and ("とは" in clean_query or "什么" in clean_query or "what" in clean_query.lower())
 
-        # プロンプトの構築（OneDriveコンテキストを含む）
+        # プロンプトの構築
         if is_about_ollama:
             # Ollamaに関する質問の場合、正確な情報を提供
             prompt = f"""以下の質問に正確に回答してください。Ollamaはビデオ共有プラットフォームではなく、
@@ -137,8 +113,31 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 - APIを通じて他のアプリケーションから利用できる{onedrive_context}"""
         else:
             # 日報に関する質問の特別処理
-            if "日報" in clean_query and onedrive_context and "件の関連ファイルが見つかりました" in onedrive_context:
-                prompt = f"""以下の質問に日本語で丁寧に回答してください。
+            if "日報" in clean_query and onedrive_context:
+                # ファイルが見つかったか確認
+                files_found = "件の関連ファイルが見つかりました" in onedrive_context
+                
+                # 特定の日付の日報を探しているか確認
+                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
+                
+                if files_found:
+                    # PDFテキスト抽出がサポートされていないケースを処理
+                    if "このPDFファイルの内容を直接表示することはできませんが、ファイルは確かに存在しています" in onedrive_context:
+                        # 日付情報を含むPDFファイルが存在することを明示
+                        pdf_file_match = re.search(r'ファイル名: (業務日報-近藤_\d{8}\.pdf)', onedrive_context)
+                        if pdf_file_match:
+                            pdf_filename = pdf_file_match.group(1)
+                            prompt = f"""以下の質問に日本語で丁寧に回答してください。
+
+質問: {clean_query}
+
+{onedrive_context}
+
+上記の情報から、質問された日付の日報ファイルは存在していますが、PDFの内容を直接抽出することができません。
+ファイルの存在は確認できていますので、内容を確認するには直接PDFファイルを開く必要があります。"""
+                        else:
+                            # 通常の処理
+                            prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
@@ -146,39 +145,54 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 
 上記の参考資料を基に具体的に回答してください。特に日付や内容を明確に述べてください。
 参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください。"""
-            elif "日報" in clean_query and not ("件の関連ファイルが見つかりました" in onedrive_context):
-                # 日報が見つからない場合
-                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
-                if date_match:
-                    year = date_match.group(1)
-                    month = date_match.group(2)
-                    day = date_match.group(3)
-                    short_path = get_shortened_path(search_path)
-                    fiscal_year = onedrive_search.get_fiscal_year_folder(year, month) if onedrive_search else f"{int(year)-1 if int(month)<4 else year}年度"
-                    
-                    prompt = f"""以下の質問に日本語で丁寧に回答してください。
+                    else:
+                        # 通常の処理
+                        prompt = f"""以下の質問に日本語で丁寧に回答してください。
+
+質問: {clean_query}
+
+{onedrive_context}
+
+上記の参考資料を基に具体的に回答してください。特に日付や内容を明確に述べてください。
+参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください。"""
+                elif not ("件の関連ファイルが見つかりました" in onedrive_context):
+                    # 日報が見つからない場合
+                    if date_match:
+                        year = date_match.group(1)
+                        month = date_match.group(2)
+                        day = date_match.group(3)
+                        short_path = get_shortened_path(search_path)
+                        prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
 {year}年{month}月{day}日の日報データは検索ディレクトリ（{short_path}）から見つかりませんでした。
-可能性のある理由:
+以下のいずれかの理由が考えられます：
 1. 指定された日付の日報が存在しない
-2. ファイル名のフォーマットが「業務日報-近藤_{year}{month}{day}.pdf」のような形式でない
-3. 日報が{fiscal_year}フォルダではなく別のフォルダに保存されている
+2. 検索可能な場所に保存されていない
+3. ファイル名が通常と異なる形式で保存されている
 4. アクセス権限の問題でファイルが見つけられない
 
-日報が見つからなかったため、この日の日報内容についてはお答えできません。別の日付をお試しいただくか、ファイル名のパターンを変えて検索してみてください。"""
+この日付の日報内容については情報がないため、お答えできません。別の日付をお試しいただくか、システム管理者にお問い合わせください。"""
+                    else:
+                        short_path = get_shortened_path(search_path)
+                        prompt = f"""以下の質問に日本語で丁寧に回答してください。
+
+質問: {clean_query}
+
+ご質問の日報データは検索ディレクトリ（{short_path}）から見つかりませんでした。具体的な日付（例：2024年10月26日）を指定すると検索できる可能性があります。
+日報検索には、年月日を含めた形で質問していただくとより正確に検索できます。"""
                 else:
-                    short_path = get_shortened_path(search_path)
+                    # OneDriveコンテキストを含むプロンプト
                     prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
-ご質問の日報データは検索ディレクトリ（{short_path}）から見つかりませんでした。具体的な日付（例：2025年3月15日）を指定すると検索できる可能性があります。
-日報検索には、年月日を含めた形で質問していただくとより正確に検索できます。
-例: 「2025年3月15日の日報内容を教えてください」"""
+{onedrive_context}
+
+上記の参考資料を基に質問に回答してください。参考資料に関連情報がない場合は、あなたの知識を使って回答してください。"""
             else:
-                # OneDriveコンテキストを含むプロンプト
+                # 通常のプロンプト処理
                 if onedrive_context:
                     prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
@@ -218,6 +232,10 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                 logger.info(f"Ollama応答JSON: {result}")
 
                 generated_text = result.get('response', '申し訳ありませんが、回答を生成できませんでした。')
+                
+                # テキストをクリーニング
+                generated_text = clean_response_text(generated_text)
+                
                 logger.info(f"生成されたテキスト: {generated_text[:100]}...")
 
                 # レスポンスが空でないことを確認
@@ -277,3 +295,45 @@ def get_shortened_path(path):
                 if len(path_parts) > 3:
                     last_parts = path_parts[-3:]
                     return f"OneDrive - {short_company}\\...\\{last_parts[-3]}\\{last_parts[-2]}\\{last_parts[-1]}"
+                
+        # 一般的な短縮
+        path_parts = path.split("\\")
+        if len(path_parts) > 3:
+            first_part = path_parts[0]
+            if ":" in first_part:  # ドライブレター
+                first_part = path_parts[0] + "\\" + path_parts[1]
+            last_parts = path_parts[-2:]
+            return f"{first_part}\\...\\{last_parts[0]}\\{last_parts[1]}"
+    
+    return path
+
+def get_fallback_response(query, is_about_ollama=False, search_path=""):
+    """
+    タイムアウトやエラー時に使用するフォールバック応答を返す（文字化け対策版）
+    """
+    short_path = get_shortened_path(search_path)
+    
+    if is_about_ollama:
+        return """Ollamaは、大規模言語モデル（LLM）をローカル環境で実行するためのオープンソースフレームワークです。
+
+主な特徴:
+1. ローカル実行: インターネット接続不要で自分のコンピュータ上でAIモデルを実行できます
+2. 複数モデル対応: Llama2, Llama3, Mistral, Gemmaなど様々なモデルを利用できます
+3. APIインターフェース: 他のアプリケーションから簡単に利用できるRESTful APIを提供します
+4. 軽量設計: 一般的なハードウェアでも動作するよう最適化されています
+
+Ollamaを使うと、プライバシーを保ちながら、AI機能を様々なソフトウェアに統合できます。
+詳細は公式サイト: https://ollama.ai/ をご覧ください。"""
+    
+    # 日報に関する質問のフォールバック
+    elif "日報" in query:
+        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+        if date_match:
+            year = date_match.group(1)
+            month = date_match.group(2)
+            day = date_match.group(3)
+            return f"{year}年{month}月{day}日の日報データを取得できませんでした。サーバーの応答に問題があるか、該当する日報が検索ディレクトリ（{short_path}）に存在しない可能性があります。時間をおいて再度お試しいただくか、システム管理者にお問い合わせください。"
+        else:
+            return f"日報データを取得できませんでした。具体的な日付（例：2024年10月26日）を指定して再度お試しください。検索ディレクトリ: {short_path}"
+    else:
+        return f"「{query}」についてのご質問ありがとうございます。ただいまOllamaサーバーの処理に時間がかかっています。少し時間をおいてから再度お試しいただくか、より具体的な質問を入力してください。"
