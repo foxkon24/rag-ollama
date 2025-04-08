@@ -1,4 +1,4 @@
-# teams_webhook.py - Logic Apps Workflowに対応した通知機能（改善版）
+# teams_webhook.py - Logic Apps Workflowに対応した通知機能（再修正版）
 import requests
 import logging
 import json
@@ -19,11 +19,11 @@ class TeamsWebhook:
             webhook_url: Teams Workflow URL (Logic Apps URL)
         """
         self.webhook_url = webhook_url
-        logger.info(f"Teams Webhook初期化完了: {webhook_url[:30]}...")
+        logger.info(f"Teams Workflowを初期化: {webhook_url[:30]}...")
 
     def send_ollama_response(self, query, response, conversation_data=None, search_path=None):
         """
-        Ollamaの応答をTeams Workflowに送信する（改善版）
+        Ollamaの応答をTeams Workflowに送信する
 
         Args:
             query: ユーザーの質問
@@ -41,27 +41,16 @@ class TeamsWebhook:
             # 現在の日時
             now = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
             
-            # 検索結果の件数を取得
-            search_result_count = 0
-            if conversation_data and "search_result_count" in conversation_data:
-                search_result_count = conversation_data.get("search_result_count", 0)
-            else:
-                # レスポンステキストから検索結果件数を抽出
-                result_count_match = re.search(r'【検索結果: (\d+)件のファイルが見つかりました】', response)
-                if result_count_match:
-                    search_result_count = int(result_count_match.group(1))
-                    # ヘッダーを削除
-                    response = response.replace(result_count_match.group(0), "").strip()
+            # レスポンス内の見出し重複を削除（「回答」「【回答】」などが既にある場合）
+            clean_response = response
+            if clean_response.startswith("回答】"):
+                clean_response = clean_response[3:].strip()
+            elif clean_response.startswith("【回答】"):
+                clean_response = clean_response[4:].strip()
             
-            # 検索結果の情報を含むサブタイトル
-            search_info = ""
-            if search_result_count > 0:
-                search_info = f"{search_result_count}件のファイルが見つかりました"
-            else:
-                search_info = "関連ファイルは見つかりませんでした"
-            
-            # カードの色を検索結果に応じて変更
-            color = "Accent" if search_result_count > 0 else "Warning"
+            # 「検索結果：関連ファイルは見つかりませんでした」のメッセージを削除
+            if "検索結果：関連ファイルは見つかりませんでした" in clean_response and "件の関連ファイルが見つかりました" in clean_response:
+                clean_response = clean_response.replace("検索結果：関連ファイルは見つかりませんでした", "")
             
             # 'attachments'配列が直接ルートレベルにある形式
             root_attachments_payload = {
@@ -75,7 +64,7 @@ class TeamsWebhook:
                                     "type": "TextBlock",
                                     "size": "Medium",
                                     "weight": "Bolder",
-                                    "text": "Ollama回答",
+                                    "text": "【回答】",
                                     "wrap": True
                                 },
                                 {
@@ -87,14 +76,6 @@ class TeamsWebhook:
                                 },
                                 {
                                     "type": "TextBlock",
-                                    "text": f"検索結果: {search_info}",
-                                    "wrap": True,
-                                    "weight": "Bolder", 
-                                    "color": color,
-                                    "size": "Medium"
-                                },
-                                {
-                                    "type": "TextBlock",
                                     "text": f"検索対象: {short_path}",
                                     "wrap": True,
                                     "isSubtle": True,
@@ -102,7 +83,7 @@ class TeamsWebhook:
                                 },
                                 {
                                     "type": "TextBlock",
-                                    "text": response,
+                                    "text": clean_response,
                                     "wrap": True,
                                     "spacing": "Medium"
                                 },
@@ -123,7 +104,7 @@ class TeamsWebhook:
 
             # バックアップ用のシンプルなペイロード
             simple_payload = {
-                "text": f"### Ollama回答\n\n**質問**: {query}\n\n**検索結果**: {search_info}\n\n**検索対象**: {short_path}\n\n{response}\n\n*回答生成時刻: {now}*"
+                "text": f"### 【回答】\n\n**質問**: {query}\n\n**検索対象**: {short_path}\n\n{clean_response}\n\n*回答生成時刻: {now}*"
             }
 
             # 旧形式のペイロード（既存形式）
@@ -139,7 +120,7 @@ class TeamsWebhook:
                                         "type": "TextBlock",
                                         "size": "Medium",
                                         "weight": "Bolder",
-                                        "text": "Ollama回答",
+                                        "text": "【回答】",
                                         "wrap": True
                                     },
                                     {
@@ -150,20 +131,13 @@ class TeamsWebhook:
                                     },
                                     {
                                         "type": "TextBlock",
-                                        "text": f"検索結果: {search_info}",
-                                        "wrap": True,
-                                        "weight": "Bolder",
-                                        "color": color
-                                    },
-                                    {
-                                        "type": "TextBlock",
                                         "text": f"検索対象: {short_path}",
                                         "wrap": True,
                                         "size": "Small"
                                     },
                                     {
                                         "type": "TextBlock",
-                                        "text": response,
+                                        "text": clean_response,
                                         "wrap": True
                                     },
                                     {

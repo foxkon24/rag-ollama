@@ -1,4 +1,4 @@
-# onedrive_search.py - OneDriveファイル検索機能（PDF抽出機能改善版）
+# onedrive_search.py - OneDriveファイル検索機能（日本語対応改善版）
 import os
 import logging
 import subprocess
@@ -59,21 +59,6 @@ class OneDriveSearch:
         # 検索結果キャッシュ（パフォーマンス向上のため）
         self.search_cache = {}
         self.cache_expiry = 300  # キャッシュの有効期限（秒）
-        
-        # PDFライブラリの確認
-        self.pdf_library = None
-        try:
-            import PyPDF2
-            self.pdf_library = "PyPDF2"
-            logger.info("PDFテキスト抽出にPyPDF2を使用します")
-        except ImportError:
-            try:
-                import pdfplumber
-                self.pdf_library = "pdfplumber"
-                logger.info("PDFテキスト抽出にpdfplumberを使用します")
-            except ImportError:
-                logger.warning("PDFテキスト抽出ライブラリがインストールされていません。PDF抽出機能は限定的です。")
-                logger.warning("pip install PyPDF2 または pip install pdfplumberを実行してください。")
 
     def search_files(self, keywords, file_types=None, max_results=None, use_cache=True):
         """
@@ -416,124 +401,18 @@ class OneDriveSearch:
 
     def _extract_pdf_content(self, file_path):
         """
-        PDFファイルからテキストを抽出する（Python実装版）
-        
-        Args:
-            file_path: PDFファイルのパス
-            
-        Returns:
-            str: 抽出したテキスト
-        """
-        try:
-            # ファイル情報を取得
-            file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-            file_size_kb = file_size / 1024
-            file_modified = datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%Y-%m-%d %H:%M:%S') if os.path.exists(file_path) else "不明"
-            
-            # 基本情報を準備
-            info = f"PDF名: {os.path.basename(file_path)}\n"
-            info += f"ファイルサイズ: {file_size_kb:.1f} KB\n"
-            info += f"最終更新日時: {file_modified}\n"
-            info += f"パス: {file_path}\n"
-            info += "----------------------------------------\n"
-            
-            # PyPDF2がインストールされているかチェック
-            try:
-                import PyPDF2
-                logger.info("PyPDF2を使用してPDFからテキストを抽出します")
-                
-                # PDFファイルを開く
-                with open(file_path, 'rb') as file:
-                    pdf_reader = PyPDF2.PdfReader(file)
-                    
-                    # ページ数を取得
-                    num_pages = len(pdf_reader.pages)
-                    info += f"PDFページ数: {num_pages}\n\n"
-                    
-                    # 各ページからテキストを抽出
-                    full_text = ""
-                    for page_num in range(min(num_pages, 10)):  # 最初の10ページまで抽出（パフォーマンスのため）
-                        page = pdf_reader.pages[page_num]
-                        page_text = page.extract_text()
-                        if page_text:
-                            full_text += f"--- ページ {page_num + 1} ---\n"
-                            full_text += page_text + "\n\n"
-                    
-                    if num_pages > 10:
-                        full_text += f"(残り {num_pages - 10} ページは省略されました)\n"
-                    
-                    # テキストがない場合
-                    if not full_text.strip():
-                        info += "PDFからテキストを抽出できませんでした。画像ベースのPDFである可能性があります。\n"
-                        return info
-                    
-                    return info + full_text
-                    
-            except ImportError:
-                # pdfplumberを試す
-                try:
-                    import pdfplumber
-                    logger.info("pdfplumberを使用してPDFからテキストを抽出します")
-                    
-                    with pdfplumber.open(file_path) as pdf:
-                        num_pages = len(pdf.pages)
-                        info += f"PDFページ数: {num_pages}\n\n"
-                        
-                        full_text = ""
-                        for page_num in range(min(num_pages, 10)):  # 最初の10ページまで
-                            page = pdf.pages[page_num]
-                            page_text = page.extract_text()
-                            if page_text:
-                                full_text += f"--- ページ {page_num + 1} ---\n"
-                                full_text += page_text + "\n\n"
-                        
-                        if num_pages > 10:
-                            full_text += f"(残り {num_pages - 10} ページは省略されました)\n"
-                        
-                        if not full_text.strip():
-                            info += "PDFからテキストを抽出できませんでした。画像ベースのPDFである可能性があります。\n"
-                            return info
-                        
-                        return info + full_text
-                        
-                except ImportError:
-                    # どちらのPDFライブラリもない場合はPowerShellを試す
-                    info += "PDF抽出ライブラリ(PyPDF2, pdfplumber)がインストールされていません。\n"
-                    info += "PowerShellを使用して抽出を試みます...\n\n"
-                    
-                    # PowerShellを使用した抽出
-                    return self._extract_pdf_content_powershell(file_path, info)
-        
-        except Exception as e:
-            logger.error(f"PDF抽出中にエラーが発生しました: {str(e)}")
-            return f"PDF名: {os.path.basename(file_path)}\nPDF抽出中にエラーが発生しました: {str(e)}"
-            
-    def _extract_pdf_content_powershell(self, file_path, info=""):
-        """
-        PowerShellを使用してPDFからテキストを抽出する（バックアップ方法）
+        PDFファイルからテキストを抽出する（簡易版）
         """
         cmd = f"""
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
         try {{
             # ファイルの存在確認
             if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                # Word.Application COMオブジェクトを使用してPDFを開く試み
-                try {{
-                    $word = New-Object -ComObject Word.Application -ErrorAction Stop
-                    $word.Visible = $false
-                    $doc = $word.Documents.Open("{file_path}")
-                    $text = $doc.Content.Text
-                    $doc.Close()
-                    $word.Quit()
-                    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($word) | Out-Null
-                    
-                    # PDFの内容を出力
-                    "Word COMを使用してPDFからテキストを抽出しました:"
-                    "----------------------------------------"
-                    $text
-                }} catch {{
-                    "Word COMを使用したPDF抽出に失敗しました。"
-                    "このPDFの内容は直接読み取れませんでした。"
-                }}
+                "PDF名: {os.path.basename(file_path)}"
+                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
+                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
+                "----------------------------------------"
+                "このPDFからテキスト抽出はサポートされていません"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -541,15 +420,7 @@ class OneDriveSearch:
             "エラーが発生しました: $_"
         }}
         """
-        
-        # PowerShellの結果を取得
-        ps_result = self._extract_file_content_helper(file_path, cmd)
-        
-        # 結果がなければ基本情報だけ返す
-        if not ps_result or len(ps_result.strip()) < 50:
-            return info + "\nPDFの内容を抽出できませんでした。テキスト抽出に対応していないPDFである可能性があります。\n"
-        
-        return info + ps_result
+        return self._extract_file_content_helper(file_path, cmd)
 
     def _extract_word_content(self, file_path):
         """
@@ -699,18 +570,29 @@ class OneDriveSearch:
             file_path = result.get('path')
             file_name = result.get('name')
             modified = result.get('modified', '不明')
-            file_size = result.get('size', 0)
-            file_size_kb = file_size / 1024 if file_size else 0
 
-            # ファイルサイズをキロバイト単位で追加
-            file_info = f"=== ファイル {i+1}: {file_name} ===\n"
-            file_info += f"更新日時: {modified} サイズ: {file_size_kb:.1f} KB パス: {file_path}\n"
-            
             # ファイルの内容を読み込み
             content = self.read_file_content(file_path)
 
-            # ファイル情報とコンテンツを結合
-            file_content = file_info + content + "\n\n"
+            # コンテンツのプレビューを追加（文字数制限あり）
+            preview_length = min(2000, len(content))  # 1ファイルあたり最大2000文字
+            preview = content[:preview_length]
+
+            # 見やすいフォーマットでファイル情報を表示
+            file_content = f"=== ファイル {i+1}: {file_name} ===\n"
+            file_content += f"更新日時: {modified}\n\n"  # 更新日時の後に空行追加
+
+            # プレビューの内容を整形
+            preview_lines = preview.splitlines()
+            formatted_preview = ""
+            for line in preview_lines:
+                # 空行でない行にはインデント追加
+                if line.strip():
+                    formatted_preview += f"  {line}\n"  # インデントを追加
+                else:
+                    formatted_preview += "\n"  # 空行はそのまま
+
+            file_content += f"{formatted_preview}\n"
 
             # 最大文字数をチェック
             if total_chars + len(file_content) > max_chars:

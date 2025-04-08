@@ -1,4 +1,4 @@
-# ollama_client.py - Ollamaとの通信と応答生成（コンテンツベース回答改善版）
+# ollama_client.py - Ollamaとの通信と応答生成（日本語クエリ改善版）
 import logging
 import requests
 import traceback
@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, onedrive_search=None):
     """
-    Ollamaを使用して回答を生成する（コンテンツベース回答改善版）
+    Ollamaを使用して回答を生成する（日本語クエリ改善版）
 
     Args:
         query: ユーザーからの質問
@@ -31,7 +31,6 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
         # OneDrive検索が有効かつクエリがある場合は関連情報を検索
         onedrive_context = ""
         search_path = ""
-        retrieved_files = []
         if onedrive_search and clean_query:
             # 検索ディレクトリのパスを取得（短縮表示用）
             search_path = onedrive_search.base_directory
@@ -44,13 +43,8 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
             logger.info(f"OneDriveから関連情報を検索: {clean_query} (日付指定: {has_date})")
             try:
                 relevant_content = onedrive_search.get_relevant_content(clean_query)
-                
-                # 関連ファイル情報の抽出（メタデータ表示用）
-                file_matches = re.findall(r'=== ファイル \d+: (.+?) ===\n更新日時: (.+?)\n', relevant_content)
-                retrieved_files = [{"name": name, "date": date} for name, date in file_matches]
-                
                 if relevant_content and "件の関連ファイルが見つかりました" in relevant_content:
-                    onedrive_context = relevant_content
+                    onedrive_context = f"\n\n参考資料（OneDriveから取得 - {short_path}）:\n{relevant_content}"
                     logger.info(f"OneDriveから関連情報を取得: {len(onedrive_context)}文字")
                 else:
                     # ファイルが見つからない場合は見つからないことを明示
@@ -62,14 +56,14 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                             month = date_match.group(2)
                             day = date_match.group(3)
                             date_str = f"{year}年{month}月{day}日"
-                            onedrive_context = f"注意: {date_str}の日報は検索ディレクトリ（{short_path}）から見つかりませんでした。"
+                            onedrive_context = f"\n\n注意: {date_str}の日報は検索ディレクトリ（{short_path}）から見つかりませんでした。"
                     else:
-                        onedrive_context = f"注意: 関連する日報ファイルは検索ディレクトリ（{short_path}）から見つかりませんでした。"
+                        onedrive_context = f"\n\n注意: 関連する日報ファイルは検索ディレクトリ（{short_path}）から見つかりませんでした。"
                     
                     logger.info("関連情報は見つかりませんでした")
             except Exception as e:
                 logger.error(f"OneDrive検索中にエラーが発生: {str(e)}")
-                onedrive_context = f"注意: OneDriveでの検索中にエラーが発生しました。検索パス: {short_path}"
+                onedrive_context = f"\n\n注意: OneDriveでの検索中にエラーが発生しました。検索パス: {short_path}"
 
         # Ollamaとは何かを質問されているかを確認
         is_about_ollama = "ollama" in clean_query.lower() and ("とは" in clean_query or "什么" in clean_query or "what" in clean_query.lower())
@@ -86,43 +80,28 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 - Ollamaは大規模言語モデルをローカルで実行するためのツール
 - ローカルコンピュータでLlama、Mistral、Gemmaなどのモデルを実行できる
 - プライバシーを保ちながらAI機能を利用できる
-- APIを通じて他のアプリケーションから利用できる"""
+- APIを通じて他のアプリケーションから利用できる{onedrive_context}"""
         else:
             # 日報に関する質問の特別処理
-            if "日報" in clean_query and onedrive_context and "件の関連ファイルが見つかりました" in onedrive_context:
-                prompt = f"""以下の質問に、提供された資料の内容に基づいて具体的に回答してください。
+            if "日報" in clean_query and onedrive_context:
+                if "件の関連ファイルが見つかりました" in onedrive_context:
+                    prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
-### 参考資料:
 {onedrive_context}
 
-### 指示:
-1. 上記の参考資料を精査し、質問に関連する具体的な情報を探してください。
-2. 資料から得られる事実のみに基づいて回答を作成してください。
-3. 日報の内容を詳細に分析し、質問に関連する重要な情報を抽出してください。
-4. 以下の2部構成で回答を提供してください:
-   【回答】セクション:
-   - 質問に対する直接的な回答を示す
-   - 参考資料から見つかった具体的な詳細情報を提示する
-   - 情報源として参照したファイル名と日付を明記する
-   
-   【検索結果原文】セクション:
-   - ここに元の検索結果をそのまま含める（このセクションは後で自動的に追加されるので、あなたは【回答】セクションのみ作成してください）
-5. 資料に情報がない場合は、「資料には記載がありません」と明示してください。
-6. 推測や一般的な知識による補完は行わず、資料に記載されている事実のみを使用してください。
-
-あなたの回答は【回答】の見出しで始め、検索結果原文は自動的に追加されるので含めないでください。"""
-
-            elif "日報" in clean_query and not ("件の関連ファイルが見つかりました" in onedrive_context):
-                # 日報が見つからない場合
-                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
-                if date_match:
-                    year = date_match.group(1)
-                    month = date_match.group(2)
-                    day = date_match.group(3)
-                    short_path = get_shortened_path(search_path)
-                    prompt = f"""以下の質問に日本語で丁寧に回答してください。
+上記の参考資料を基に具体的に回答してください。特に日付や内容を明確に述べてください。
+参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください。"""
+                else:
+                    # 日報が見つからない場合
+                    date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
+                    if date_match:
+                        year = date_match.group(1)
+                        month = date_match.group(2)
+                        day = date_match.group(3)
+                        short_path = get_shortened_path(search_path)
+                        prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
@@ -134,9 +113,9 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 4. アクセス権限の問題でファイルが見つけられない
 
 この日付の日報内容については情報がないため、お答えできません。別の日付をお試しいただくか、システム管理者にお問い合わせください。"""
-                else:
-                    short_path = get_shortened_path(search_path)
-                    prompt = f"""以下の質問に日本語で丁寧に回答してください。
+                    else:
+                        short_path = get_shortened_path(search_path)
+                        prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
@@ -144,47 +123,14 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 日報検索には、年月日を含めた形で質問していただくとより正確に検索できます。"""
             else:
                 # OneDriveコンテキストを含むプロンプト
-                if onedrive_context and "件の関連ファイルが見つかりました" in onedrive_context:
-                    # ファイルのメタデータ情報を追加
-                    file_info = ""
-                    if retrieved_files:
-                        file_info = "検索結果ファイル一覧:\n"
-                        for i, file in enumerate(retrieved_files):
-                            file_info += f"{i+1}. {file['name']} (更新: {file['date']})\n"
-                    
-                    prompt = f"""以下の質問に対して、提供された資料の内容に基づいて詳細かつ具体的に回答してください。
-
-質問: {clean_query}
-
-{file_info}
-
-### 参考資料:
-{onedrive_context}
-
-### 指示:
-1. 上記の参考資料を詳細に分析し、質問に対する適切な情報を抽出してください。
-2. 資料から得られる具体的な事実に基づいて回答を作成してください。
-3. 重要な情報、具体的な数字、日付、名前などの詳細を正確に引用してください。
-4. 以下の2部構成で回答を提供してください:
-   【回答】セクション:
-   - 質問への直接的な回答
-   - 参考資料から抽出した関連する重要な詳細情報
-   - 必要に応じて、情報の出典となったファイル名
-   
-   【検索結果原文】セクション:
-   - ここには元の検索結果がそのまま含められます（このセクションは後で自動的に追加されるので、あなたは【回答】セクションのみ作成してください）
-5. 資料に記載されていない情報については、「この点については資料に記載がありません」と明示してください。
-
-あなたの回答は【回答】の見出しで始め、検索結果原文は自動的に追加されるので含めないでください。"""
-                elif onedrive_context:
-                    # 検索結果がない場合のプロンプト
+                if onedrive_context:
                     prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
 {onedrive_context}
 
-上記の注意事項を踏まえて、あなたの知識に基づいて質問に回答してください。"""
+上記の参考資料を基に質問に回答してください。参考資料に関連情報がない場合は、あなたの知識を使って回答してください。"""
                 else:
                     prompt = clean_query
 
@@ -222,65 +168,11 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                 if not generated_text.strip():
                     generated_text = "申し訳ありませんが、有効な回答を生成できませんでした。"
                 
-                # OneDriveから検索結果があった場合の処理
-                if onedrive_context and "件の関連ファイルが見つかりました" in onedrive_context and not is_about_ollama:
-                    # 【回答】セクションの確認
-                    if "【回答】" not in generated_text:
-                        generated_text = f"【回答】\n{generated_text}"
-                    
-                    # 検索結果原文を追加
-                    search_result_raw = "\n\n【検索結果原文】\n" + onedrive_context
-                    
-                    # PDFファイルの情報がある場合、見やすく整形
-                    if ".pdf" in search_result_raw.lower() and "pdf名:" in search_result_raw.lower():
-                        # PDFファイル情報の整形（PDFの内容部分を見やすく）
-                        pdf_sections = re.findall(r'(=== ファイル \d+:.+?PDF名:.+?-+\n)(.*?)(?===|\Z)', search_result_raw, re.DOTALL)
-                        if pdf_sections:
-                            formatted_search_result = ""
-                            for header, content in pdf_sections:
-                                formatted_search_result += header + "\n"
-                                
-                                # 抽出されたPDFテキストの整形
-                                if "PDFページ数:" in content:
-                                    # 新しいPDF抽出形式
-                                    formatted_search_result += content
-                                else:
-                                    # 従来の形式またはPowerShellからの出力
-                                    formatted_search_result += content.strip() + "\n\n"
-                            
-                            # 元の検索結果の最初の部分（件数情報など）を保持
-                            first_file_pos = search_result_raw.find("=== ファイル 1:")
-                            if first_file_pos > 0:
-                                header_part = search_result_raw[:first_file_pos]
-                                search_result_raw = header_part + formatted_search_result
-                    
-                    # 長すぎる場合は省略
-                    if len(generated_text) + len(search_result_raw) > 8000:
-                        # 長すぎる場合は省略するが、PDF情報部分は保持する
-                        max_length = 4000
-                        if ".pdf" in search_result_raw.lower() and "pdf名:" in search_result_raw.lower():
-                            # PDFファイル情報の前後を保持
-                            pdf_intro_pos = search_result_raw.lower().find("pdf名:")
-                            if pdf_intro_pos > 0:
-                                # PDF情報の前半部分
-                                first_part = search_result_raw[:pdf_intro_pos+500]
-                                # 残りの部分は省略
-                                search_result_raw = first_part + "\n...(省略)...\n"
-                        else:
-                            # 単純に切り詰め
-                            search_result_raw = search_result_raw[:max_length] + "\n...(省略)...\n"
-                    
-                    # 参照情報を回答の最後に追加
-                    generated_text += search_result_raw
-                
-                # 検索したファイル情報を最後に追加（検索結果原文を追加していない場合のみ）
-                elif retrieved_files and not is_about_ollama:
-                    source_info = "\n\n[参照ファイル情報]\n"
-                    for i, file in enumerate(retrieved_files[:5]):  # 最大5件まで表示
-                        source_info += f"・{file['name']} (更新: {file['date']})\n"
-                    
-                    # 参照情報を回答の最後に追加
-                    generated_text += source_info
+                # 重複見出しの削除
+                if generated_text.startswith("回答】"):
+                    generated_text = generated_text[3:]  # 「回答】」を削除
+                elif generated_text.startswith("【回答】"):
+                    generated_text = generated_text[4:]  # 「【回答】」を削除
 
                 logger.info("回答が正常に生成されました")
                 return generated_text
