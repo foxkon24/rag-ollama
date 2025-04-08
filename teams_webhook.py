@@ -1,4 +1,4 @@
-# teams_webhook.py - Power Automateワークフロー対応版（修正版）
+# teams_webhook.py - Logic Apps Workflowに対応した通知機能（Power Automate最適化版）
 import requests
 import logging
 import json
@@ -8,7 +8,7 @@ import re
 import os
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.DEBUG)  # 詳細なログを有効化
 
 class TeamsWebhook:
     def __init__(self, webhook_url):
@@ -23,7 +23,7 @@ class TeamsWebhook:
 
     def send_ollama_response(self, query, response, conversation_data=None, search_path=None):
         """
-        Ollamaの応答をTeams Workflowに送信する（修正版）
+        Ollamaの応答をTeams Workflowに送信する（Power Automate対応版）
 
         Args:
             query: ユーザーの質問
@@ -41,57 +41,54 @@ class TeamsWebhook:
             # 現在の日時
             now = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
             
-            # Power Automateワークフロー用のペイロード（主にこれを使用）
-            # body.attachments 構造に修正
+            # Power Automate互換の最適な形式 - 'attachments'が直接ルートレベルにある
             power_automate_payload = {
-                "body": {
-                    "attachments": [
-                        {
-                            "contentType": "application/vnd.microsoft.card.adaptive",
-                            "content": {
-                                "type": "AdaptiveCard",
-                                "body": [
-                                    {
-                                        "type": "TextBlock",
-                                        "size": "Medium",
-                                        "weight": "Bolder",
-                                        "text": "Ollama回答",
-                                        "wrap": True
-                                    },
-                                    {
-                                        "type": "TextBlock",
-                                        "text": f"質問: {query}",
-                                        "wrap": True,
-                                        "weight": "Bolder",
-                                        "color": "Accent"
-                                    },
-                                    {
-                                        "type": "TextBlock",
-                                        "text": f"検索対象: {short_path}",
-                                        "wrap": True,
-                                        "isSubtle": True,
-                                        "size": "Small"
-                                    },
-                                    {
-                                        "type": "TextBlock",
-                                        "text": response,
-                                        "wrap": True,
-                                        "spacing": "Medium"
-                                    },
-                                    {
-                                        "type": "TextBlock",
-                                        "text": f"回答生成時刻: {now}",
-                                        "wrap": True,
-                                        "size": "Small",
-                                        "isSubtle": True
-                                    }
-                                ],
-                                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                                "version": "1.0"
-                            }
+                "attachments": [
+                    {
+                        "contentType": "application/vnd.microsoft.card.adaptive",
+                        "content": {
+                            "type": "AdaptiveCard",
+                            "body": [
+                                {
+                                    "type": "TextBlock",
+                                    "size": "Medium",
+                                    "weight": "Bolder",
+                                    "text": "Ollama回答",
+                                    "wrap": True
+                                },
+                                {
+                                    "type": "TextBlock",
+                                    "text": f"質問: {query}",
+                                    "wrap": True,
+                                    "weight": "Bolder",
+                                    "color": "Accent"
+                                },
+                                {
+                                    "type": "TextBlock",
+                                    "text": f"検索対象: {short_path}",
+                                    "wrap": True,
+                                    "isSubtle": True,
+                                    "size": "Small"
+                                },
+                                {
+                                    "type": "TextBlock",
+                                    "text": response,
+                                    "wrap": True,
+                                    "spacing": "Medium"
+                                },
+                                {
+                                    "type": "TextBlock",
+                                    "text": f"回答生成時刻: {now}",
+                                    "wrap": True,
+                                    "size": "Small",
+                                    "isSubtle": True
+                                }
+                            ],
+                            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                            "version": "1.0"
                         }
-                    ]
-                }
+                    }
+                ]
             }
 
             # バックアップ用のシンプルなペイロード
@@ -104,7 +101,7 @@ class TeamsWebhook:
                 'Content-Type': 'application/json'
             }
 
-            # Power Automateワークフロー用のペイロードで試行
+            # 1. まずPower Automate最適化形式で試行
             logger.debug(f"Logic Apps送信ペイロード(Power Automate形式): {json.dumps(power_automate_payload)[:300]}...")
 
             try:
@@ -121,34 +118,32 @@ class TeamsWebhook:
                     return {"status": "success", "code": r.status_code, "format": "Power Automate形式"}
                 else:
                     logger.warning(f"Power Automate形式での送信失敗: {r.status_code}。シンプル形式で再試行します。")
-                    # エラーレスポンスの詳細をログに記録
-                    logger.warning(f"エラーレスポンス: {r.text}")
 
             except Exception as e:
                 logger.warning(f"Power Automate形式送信エラー: {str(e)}。シンプル形式で再試行します。")
 
-            # シンプル形式で試行（最後の手段）
+            # 2. シンプル形式で試行（最後の手段）
             logger.debug(f"Logic Apps送信ペイロード(シンプル): {json.dumps(simple_payload)[:300]}...")
 
             try:
-                r3 = requests.post(
+                r2 = requests.post(
                     self.webhook_url, 
                     json=simple_payload, 
                     headers=headers,
                     timeout=30
                 )
-                logger.debug(f"Logic Apps応答(シンプル): {r3.status_code}, {r3.text[:100] if r3.text else '空のレスポンス'}")
+                logger.debug(f"Logic Apps応答(シンプル): {r2.status_code}, {r2.text[:100] if r2.text else '空のレスポンス'}")
 
-                if r3.status_code >= 200 and r3.status_code < 300:
-                    logger.info(f"シンプル形式でのLogic Apps通知送信成功: {r3.status_code}")
-                    return {"status": "success", "code": r3.status_code, "format": "シンプル"}
+                if r2.status_code >= 200 and r2.status_code < 300:
+                    logger.info(f"シンプル形式でのLogic Apps通知送信成功: {r2.status_code}")
+                    return {"status": "success", "code": r2.status_code, "format": "シンプル"}
                 else:
-                    logger.error(f"Logic Apps通知の送信に全て失敗しました: 最終ステータスコード={r3.status_code}")
-                    return {"status": "error", "code": r3.status_code, "message": r3.text}
+                    logger.error(f"Logic Apps通知の送信に全て失敗しました: 最終ステータスコード={r2.status_code}")
+                    return {"status": "error", "code": r2.status_code, "message": r2.text}
 
-            except Exception as e3:
-                logger.error(f"シンプル形式送信エラー: {str(e3)}")
-                return {"status": "error", "message": str(e3)}
+            except Exception as e2:
+                logger.error(f"シンプル形式送信エラー: {str(e2)}")
+                return {"status": "error", "message": str(e2)}
 
         except Exception as e:
             logger.error(f"Logic Apps通知の送信中にエラーが発生しました: {str(e)}")
