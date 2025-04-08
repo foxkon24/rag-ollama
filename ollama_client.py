@@ -1,4 +1,4 @@
-# ollama_client.py - Ollamaとの通信と応答生成（日本語クエリ改善版）
+# ollama_client.py - Ollamaとの通信と応答生成（PDF対応版）
 import logging
 import requests
 import traceback
@@ -31,6 +31,8 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
         # OneDrive検索が有効かつクエリがある場合は関連情報を検索
         onedrive_context = ""
         search_path = ""
+        found_pdf_paths = []  # 見つかったPDFファイルのパスを保存
+
         if onedrive_search and clean_query:
             # 検索ディレクトリのパスを取得（短縮表示用）
             search_path = onedrive_search.base_directory
@@ -43,6 +45,16 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
             logger.info(f"OneDriveから関連情報を検索: {clean_query} (日付指定: {has_date})")
             try:
                 relevant_content = onedrive_search.get_relevant_content(clean_query)
+                
+                # PDFパスを抽出（後で日付を取得するため）
+                if has_date:
+                    # 検索結果からPDFファイルのパスを抽出
+                    search_results = onedrive_search.search_files(clean_query)
+                    for result in search_results:
+                        if result.get('path', '').lower().endswith('.pdf'):
+                            found_pdf_paths.append(result.get('path'))
+                
+                # 関連ファイルが見つかった場合
                 if relevant_content and "件の関連ファイルが見つかりました" in relevant_content:
                     onedrive_context = f"\n\n参考資料（OneDriveから取得 - {short_path}）:\n{relevant_content}"
                     logger.info(f"OneDriveから関連情報を取得: {len(onedrive_context)}文字")
@@ -82,10 +94,48 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 - プライバシーを保ちながらAI機能を利用できる
 - APIを通じて他のアプリケーションから利用できる{onedrive_context}"""
         else:
+            # 日報に関する質問で、PDFが見つかったが内容が抽出できていない場合の特別処理
+            if "日報" in clean_query and found_pdf_paths and "件の関連ファイルが見つかりました" in onedrive_context and "のファイルから抽出できません" in relevant_content:
+                # PDFファイル名から情報を取得
+                pdf_info = ""
+                for pdf_path in found_pdf_paths[:3]:  # 最初の3件まで
+                    pdf_name = os.path.basename(pdf_path)
+                    pdf_size = os.path.getsize(pdf_path) if os.path.exists(pdf_path) else "不明"
+                    pdf_modified = ""
+                    try:
+                        pdf_modified = os.path.getmtime(pdf_path)
+                        from datetime import datetime
+                        pdf_modified = datetime.fromtimestamp(pdf_modified).strftime('%Y年%m月%d日 %H:%M:%S')
+                    except:
+                        pdf_modified = "不明"
+                    
+                    pdf_info += f"- ファイル名: {pdf_name}\n"
+                    pdf_info += f"  サイズ: {pdf_size} バイト\n"
+                    pdf_info += f"  更新日時: {pdf_modified}\n"
+                
+                # 日付を抽出
+                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
+                date_str = ""
+                if date_match:
+                    year = date_match.group(1)
+                    month = date_match.group(2)
+                    day = date_match.group(3)
+                    date_str = f"{year}年{month}月{day}日"
+                
+                prompt = f"""以下の質問に日本語で丁寧に回答してください。
+
+質問: {clean_query}
+
+{date_str}の日報ファイルは見つかりましたが、現在のシステムではPDFからのテキスト抽出に制限があるため、内容を表示できません。
+以下のファイル情報をお知らせします：
+
+{pdf_info}
+
+PDFファイルを直接開いて内容をご確認ください。システム管理者にPDFテキスト抽出機能の有効化をご依頼ください。"""
+                
             # 日報に関する質問の特別処理
-            if "日報" in clean_query and onedrive_context:
-                if "件の関連ファイルが見つかりました" in onedrive_context:
-                    prompt = f"""以下の質問に日本語で丁寧に回答してください。
+            elif "日報" in clean_query and onedrive_context and "件の関連ファイルが見つかりました" in onedrive_context:
+                prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
@@ -93,15 +143,15 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 
 上記の参考資料を基に具体的に回答してください。特に日付や内容を明確に述べてください。
 参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください。"""
-                else:
-                    # 日報が見つからない場合
-                    date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
-                    if date_match:
-                        year = date_match.group(1)
-                        month = date_match.group(2)
-                        day = date_match.group(3)
-                        short_path = get_shortened_path(search_path)
-                        prompt = f"""以下の質問に日本語で丁寧に回答してください。
+            elif "日報" in clean_query and not ("件の関連ファイルが見つかりました" in onedrive_context):
+                # 日報が見つからない場合
+                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
+                if date_match:
+                    year = date_match.group(1)
+                    month = date_match.group(2)
+                    day = date_match.group(3)
+                    short_path = get_shortened_path(search_path)
+                    prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
@@ -113,9 +163,9 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 4. アクセス権限の問題でファイルが見つけられない
 
 この日付の日報内容については情報がないため、お答えできません。別の日付をお試しいただくか、システム管理者にお問い合わせください。"""
-                    else:
-                        short_path = get_shortened_path(search_path)
-                        prompt = f"""以下の質問に日本語で丁寧に回答してください。
+                else:
+                    short_path = get_shortened_path(search_path)
+                    prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
@@ -167,28 +217,22 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                 # レスポンスが空でないことを確認
                 if not generated_text.strip():
                     generated_text = "申し訳ありませんが、有効な回答を生成できませんでした。"
-                
-                # 重複見出しの削除
-                if generated_text.startswith("回答】"):
-                    generated_text = generated_text[3:]  # 「回答】」を削除
-                elif generated_text.startswith("【回答】"):
-                    generated_text = generated_text[4:]  # 「【回答】」を削除
 
                 logger.info("回答が正常に生成されました")
                 return generated_text
 
             else:
                 # エラーが発生した場合のフォールバック応答
-                return get_fallback_response(clean_query, is_about_ollama, search_path)
+                return get_fallback_response(clean_query, is_about_ollama, search_path, found_pdf_paths)
 
         except requests.exceptions.Timeout:
             logger.error("Ollamaリクエストがタイムアウトしました")
             # タイムアウト時のフォールバック応答
-            return get_fallback_response(clean_query, is_about_ollama, search_path)
+            return get_fallback_response(clean_query, is_about_ollama, search_path, found_pdf_paths)
 
         except requests.exceptions.ConnectionError:
             logger.error("Ollamaサーバーに接続できませんでした")
-            return get_fallback_response(clean_query, is_about_ollama, search_path)
+            return get_fallback_response(clean_query, is_about_ollama, search_path, found_pdf_paths)
 
     except Exception as e:
         logger.error(f"回答生成中にエラーが発生しました: {str(e)}")
@@ -239,7 +283,7 @@ def get_shortened_path(path):
     
     return path
 
-def get_fallback_response(query, is_about_ollama=False, search_path=""):
+def get_fallback_response(query, is_about_ollama=False, search_path="", found_pdf_paths=None):
     """
     タイムアウトやエラー時に使用するフォールバック応答を返す
 
@@ -247,6 +291,7 @@ def get_fallback_response(query, is_about_ollama=False, search_path=""):
         query: ユーザーの質問
         is_about_ollama: Ollamaに関する質問かどうか
         search_path: 検索したパス
+        found_pdf_paths: 見つかったPDFファイルのパスリスト
 
     Returns:
         フォールバック応答
@@ -264,6 +309,21 @@ def get_fallback_response(query, is_about_ollama=False, search_path=""):
 
 Ollamaを使うと、プライバシーを保ちながら、AI機能を様々なソフトウェアに統合できます。
 詳細は公式サイト: https://ollama.ai/ をご覧ください。"""
+    
+    # PDFファイルが見つかった場合の特別処理
+    if found_pdf_paths:
+        # PDFファイル名から情報を取得
+        pdf_info = ""
+        for pdf_path in found_pdf_paths[:3]:  # 最初の3件まで
+            pdf_name = os.path.basename(pdf_path)
+            pdf_info += f"- {pdf_name}\n"
+        
+        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+        if date_match:
+            year = date_match.group(1)
+            month = date_match.group(2)
+            day = date_match.group(3)
+            return f"{year}年{month}月{day}日の日報ファイルは見つかりましたが、現在PDFテキスト抽出機能に問題があるため内容を表示できません。以下のファイルを直接確認してください:\n\n{pdf_info}\n\nシステム管理者にPDFテキスト抽出機能の修正を依頼してください。"
     
     # 日報に関する質問のフォールバック
     elif "日報" in query:

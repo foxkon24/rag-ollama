@@ -1,4 +1,4 @@
-# onedrive_search.py - OneDriveファイル検索機能（日本語対応改善版）
+# onedrive_search.py - OneDriveファイル検索機能（PDF抽出機能追加版）
 import os
 import logging
 import subprocess
@@ -332,7 +332,7 @@ class OneDriveSearch:
                     logger.warning(f"代替エンコーディングで読み込みました: {file_path}")
                     return content
             else:
-                # バイナリファイルの場合はPowerShellを使用して内容を抽出
+                # バイナリファイルの場合はファイル形式に合わせて処理
                 if ext in ['.pdf']:
                     return self._extract_pdf_content(file_path)
                 elif ext in ['.docx']:
@@ -401,20 +401,94 @@ class OneDriveSearch:
 
     def _extract_pdf_content(self, file_path):
         """
-        PDFファイルからテキストを抽出する（簡易版）
+        PDFファイルからテキストを抽出する（改善版）
         """
+        # まずPythonライブラリでの抽出を試みる
+        try:
+            import PyPDF2
+            logger.info(f"PyPDF2を使用してPDFを読み込みます: {file_path}")
+            
+            try:
+                with open(file_path, 'rb') as file:
+                    reader = PyPDF2.PdfReader(file)
+                    text = f"PDF名: {os.path.basename(file_path)}\n"
+                    text += f"ページ数: {len(reader.pages)}\n"
+                    text += f"最終更新日時: {time.ctime(os.path.getmtime(file_path))}\n"
+                    text += "----------------------------------------\n\n"
+                    
+                    # すべてのページからテキストを抽出
+                    for page_num in range(len(reader.pages)):
+                        page_text = reader.pages[page_num].extract_text()
+                        if page_text:
+                            text += f"【ページ {page_num+1}】\n{page_text}\n\n"
+                        else:
+                            text += f"【ページ {page_num+1}】(テキストが抽出できませんでした)\n\n"
+                    
+                    logger.info(f"PDFから{len(reader.pages)}ページ分のテキストを抽出しました")
+                    return text
+            except Exception as e:
+                logger.error(f"PyPDF2でのPDF処理中にエラー: {str(e)}")
+                # PyPDF2が失敗した場合はPowerShellを使用
+        except ImportError:
+            logger.warning("PyPDF2が見つかりません。PowerShellでの処理に切り替えます。")
+        
+        # PowerShellを使った抽出を試みる
         cmd = f"""
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
         try {{
-            # ファイルの存在確認
-            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "PDF名: {os.path.basename(file_path)}"
-                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                "----------------------------------------"
-                "このPDFからテキスト抽出はサポートされていません"
-            }} else {{
-                "ファイルが見つかりません: {file_path}"
+            # まずiTextSharpライブラリを使って抽出を試みる
+            $pdfContent = ""
+            
+            try {{
+                # NuGetから必要なライブラリをインストール
+                if (-not (Test-Path "$env:TEMP\\itextsharp.dll")) {{
+                    $webClient = New-Object System.Net.WebClient
+                    $webClient.DownloadFile("https://github.com/itext/itextsharp/releases/download/5.5.13.3/itextsharp.dll", "$env:TEMP\\itextsharp.dll")
+                }}
+                
+                Add-Type -Path "$env:TEMP\\itextsharp.dll"
+                $reader = New-Object iTextSharp.text.pdf.PdfReader("{file_path}")
+                
+                $pdfContent += "PDF名: {os.path.basename(file_path)}`n"
+                $pdfContent += "ページ数: " + $reader.NumberOfPages + "`n"
+                $pdfContent += "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime + "`n"
+                $pdfContent += "----------------------------------------`n`n"
+                
+                for($page = 1; $page -le $reader.NumberOfPages; $page++) {{
+                    $strategy = New-Object iTextSharp.text.pdf.parser.SimpleTextExtractionStrategy
+                    $currentText = [iTextSharp.text.pdf.parser.PdfTextExtractor]::GetTextFromPage($reader, $page, $strategy)
+                    $pdfContent += "【ページ $page】`n$currentText`n`n"
+                }}
+                
+                $reader.Close()
+                $pdfContent
+            }} catch {{
+                # iTextSharpが失敗した場合はWord APIを使用した方法を試みる
+                try {{
+                    $word = New-Object -ComObject Word.Application
+                    $word.Visible = $false
+                    
+                    $pdfContent += "PDF名: {os.path.basename(file_path)}`n"
+                    $pdfContent += "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes`n"
+                    $pdfContent += "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime + "`n"
+                    $pdfContent += "----------------------------------------`n`n"
+                    
+                    # PDFを開いてテキスト抽出
+                    $doc = $word.Documents.Open("{file_path}", $false, $true)
+                    $pdfContent += $doc.Content.Text
+                    $doc.Close()
+                    $word.Quit()
+                    
+                    $pdfContent
+                }} catch {{
+                    # Wordでの抽出も失敗した場合はメタデータだけ表示
+                    $pdfContent += "PDF名: {os.path.basename(file_path)}`n"
+                    $pdfContent += "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes`n"
+                    $pdfContent += "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime + "`n"
+                    $pdfContent += "----------------------------------------`n`n"
+                    $pdfContent += "このPDFからテキストを抽出できませんでした。PDFがパスワード保護されているか、スキャン画像が含まれている可能性があります。`n"
+                    $pdfContent += "直接PDFを開いて内容を確認してください: {file_path}`n"
+                    $pdfContent
+                }}
             }}
         }} catch {{
             "エラーが発生しました: $_"
@@ -488,6 +562,38 @@ class OneDriveSearch:
         }}
         """
         return self._extract_file_content_helper(file_path, cmd)
+
+    def read_pdf_content(self, file_path):
+        """
+        PDFファイルの内容を読み込む（PyPDF2使用）
+        
+        Args:
+            file_path: PDFファイルのパス
+            
+        Returns:
+            PDFから抽出したテキスト
+        """
+        try:
+            import PyPDF2
+            with open(file_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                text = f"PDF名: {os.path.basename(file_path)}\n"
+                text += f"ページ数: {len(reader.pages)}\n"
+                text += f"最終更新日時: {time.ctime(os.path.getmtime(file_path))}\n"
+                text += "----------------------------------------\n\n"
+                
+                for page_num in range(len(reader.pages)):
+                    page_text = reader.pages[page_num].extract_text()
+                    if page_text:
+                        text += f"【ページ {page_num+1}】\n{page_text}\n\n"
+                    else:
+                        text += f"【ページ {page_num+1}】(テキストが抽出できませんでした)\n\n"
+                
+                return text
+        except ImportError:
+            return "PDFの読み込みにはPyPDF2ライブラリが必要です。pip install PyPDF2 でインストールしてください。"
+        except Exception as e:
+            return f"PDFの読み込み中にエラーが発生しました: {str(e)}"
 
     def get_relevant_content(self, query, max_files=None, max_chars=8000):
         """
@@ -578,21 +684,9 @@ class OneDriveSearch:
             preview_length = min(2000, len(content))  # 1ファイルあたり最大2000文字
             preview = content[:preview_length]
 
-            # 見やすいフォーマットでファイル情報を表示
             file_content = f"=== ファイル {i+1}: {file_name} ===\n"
-            file_content += f"更新日時: {modified}\n\n"  # 更新日時の後に空行追加
-
-            # プレビューの内容を整形
-            preview_lines = preview.splitlines()
-            formatted_preview = ""
-            for line in preview_lines:
-                # 空行でない行にはインデント追加
-                if line.strip():
-                    formatted_preview += f"  {line}\n"  # インデントを追加
-                else:
-                    formatted_preview += "\n"  # 空行はそのまま
-
-            file_content += f"{formatted_preview}\n"
+            file_content += f"更新日時: {modified}\n"
+            file_content += f"{preview}\n\n"
 
             # 最大文字数をチェック
             if total_chars + len(file_content) > max_chars:
