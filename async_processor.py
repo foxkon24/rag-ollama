@@ -1,9 +1,7 @@
-# async_processor.py - OneDrive検索機能を組み込んだ非同期処理（改善版）
+# async_processor.py - OneDrive検索機能を組み込んだ非同期処理（pypdf対応版）
 import logging
 import traceback
-import subprocess
-import re
-import os
+import time
 from ollama_client import generate_ollama_response
 
 logger = logging.getLogger(__name__)
@@ -11,7 +9,7 @@ logger.setLevel(logging.DEBUG)  # 詳細なログを有効化
 
 def process_query_async(query_text, original_data, ollama_url, ollama_model, ollama_timeout, teams_webhook, onedrive_search=None):
     """
-    クエリを非同期で処理し、結果をTeamsに通知する（OneDrive検索機能付き・改善版）
+    クエリを非同期で処理し、結果をTeamsに通知する（OneDrive検索機能付き）
 
     Args:
         query_text: 処理するクエリテキスト
@@ -25,7 +23,20 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
     try:
         # クリーンなクエリを抽出
         clean_query = query_text.replace('ollama質問', '').strip()
-
+        
+        # ログにリクエスト情報を記録
+        logger.info(f"非同期処理を開始: query='{clean_query}', model={ollama_model}")
+        
+        # 日付形式かどうかを確認
+        import re
+        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
+        
+        if date_match:
+            year = date_match.group(1)
+            month = date_match.group(2).zfill(2)
+            day = date_match.group(3).zfill(2)
+            logger.info(f"日付指定のある検索を実行します: '{year}年{month}月{day}日'")
+        
         # OneDrive検索を実行するかどうかを判断
         use_onedrive = onedrive_search is not None and 'onedrive' not in clean_query.lower()
 
@@ -34,47 +45,11 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
         if onedrive_search is not None:
             search_path = onedrive_search.base_directory
         
-        # 日付を含むかどうかを確認（日報検索に重要）
-        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
-        has_date = bool(date_match)
-        
         # OneDrive検索のログ
         if use_onedrive:
-            if has_date:
-                # 日付情報を詳細に出力
-                year = date_match.group(1)
-                month = date_match.group(2).zfill(2)
-                day = date_match.group(3).zfill(2)
-                date_str = f"{year}年{month}月{day}日"
-                logger.info(f"日付指定のある検索を実行します: '{date_str}'")
-                
-                # 検索前に年度フォルダの存在チェック
-                if onedrive_search:
-                    try:
-                        fiscal_year = onedrive_search.get_fiscal_year_folder(year, month)
-                        # PowerShellでディレクトリ存在チェック
-                        ps_command = f"""
-                        Get-ChildItem -Path "{search_path}" -Recurse -Directory | 
-                        Where-Object {{ $_.Name -like "*{fiscal_year}*" -or $_.FullName -like "*{fiscal_year}*" }} | 
-                        Select-Object -First 1 | ForEach-Object {{ $_.FullName }}
-                        """
-                        result = subprocess.check_output(["powershell", "-Command", ps_command], text=True).strip()
-                        if result:
-                            logger.info(f"年度フォルダが見つかりました: {result}")
-                            # フォルダ内のファイル例を確認
-                            ps_command2 = f"""
-                            Get-ChildItem -Path "{result}" -File | 
-                            Select-Object -First 3 | ForEach-Object {{ $_.Name }}
-                            """
-                            file_examples = subprocess.check_output(["powershell", "-Command", ps_command2], text=True).strip()
-                            if file_examples:
-                                logger.info(f"フォルダ内のファイル例: \n{file_examples}")
-                        else:
-                            logger.warning(f"年度フォルダ '{fiscal_year}' が見つかりませんでした")
-                    except Exception as e:
-                        logger.error(f"年度フォルダチェック中にエラー: {str(e)}")
-            else:
-                logger.info(f"通常のOneDrive検索を実行します: '{clean_query}'")
+            logger.info(f"OneDrive検索を実行します: '{clean_query}'")
+            logger.info(f"検索ディレクトリ: {search_path}")
+            # 検索結果はOllama処理内で取得される
         else:
             if onedrive_search is None:
                 logger.info("OneDrive検索が無効化されています")
@@ -82,6 +57,9 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
                 logger.info("OneDriveに関する質問のため、検索をスキップします")
 
         # Ollamaで回答を生成（OneDrive検索結果を含む）
+        logger.info(f"Ollama APIリクエスト開始: {ollama_url}")
+        start_time = time.time()
+        
         response = generate_ollama_response(
             query_text, 
             ollama_url, 
@@ -89,18 +67,60 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
             ollama_timeout,
             onedrive_search if use_onedrive else None
         )
-        logger.info(f"非同期処理による応答生成完了: {response[:100]}...")
+        
+        end_time = time.time()
+        logger.info(f"非同期処理による応答生成完了: 処理時間={end_time - start_time:.2f}秒, 応答長={len(response)}文字")
+        logger.info(f"応答内容: {response[:150]}...")  # 応答の先頭部分をログに記録
+
+        # pypdfがなくてPDF抽出に失敗した場合は、インストールを試みる
+        if "PDFファイルからテキスト抽出がサポートされていない" in response and onedrive_search:
+            logger.info("PDF抽出が失敗したため、pypdfのインストールを試みます")
+            try:
+                import subprocess
+                subprocess.call(["pip", "install", "pypdf"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                logger.info("pypdfのインストールを試みました。次回のリクエストでPDF抽出機能が使用できるかもしれません")
+            except:
+                logger.warning("pypdfのインストールに失敗しました")
 
         if teams_webhook:
+            # Teams送信前にログを記録
+            logger.info(f"Teamsメッセージ送信を開始します: webhook_url={teams_webhook.webhook_url[:30]}...")
+            
             # TEAMS_WORKFLOW_URLを使用して直接Teamsに送信
-            logger.info("Teamsに直接応答を送信します")
+            start_send_time = time.time()
+            
+            # 回答が空の場合のバックアップメッセージ
+            if not response or len(response.strip()) < 10:
+                response = "申し訳ありません。有効な回答を生成できませんでした。しばらく経ってから再度お試しください。"
+                logger.warning(f"生成された回答が空または短すぎるため、デフォルトメッセージを使用します")
+            
             result = teams_webhook.send_ollama_response(clean_query, response, None, search_path)
-            logger.info(f"Teams送信結果: {result}")
+            
+            end_send_time = time.time()
+            logger.info(f"Teams送信結果: {result}, 送信時間={end_send_time - start_send_time:.2f}秒")
 
-            # 送信に失敗した場合の処理
-            if result.get("status") == "error":
-                logger.error(f"Teams送信エラー: {result.get('message', 'unknown error')}")
-                # エラー発生時は何もしない（すでにログに記録済み）
+            # 送信が成功したかどうかを確認
+            if result.get("status") == "success":
+                logger.info(f"✅ Teams送信成功: 形式={result.get('format')}, コード={result.get('code')}")
+            else:
+                logger.error(f"❌ Teams送信エラー: {result.get('message', 'unknown error')}")
+                # エラーの詳細を記録
+                error_msg = f"Teams送信エラー詳細: {result}"
+                logger.error(error_msg)
+                
+                # 再試行 - シンプルな形式でもう一度
+                try:
+                    logger.info("シンプルな形式で再試行します")
+                    # Teams Webhookの直接HTTPリクエスト
+                    import requests
+                    simple_payload = {
+                        "text": f"### Ollama回答 (再送)\n\n**質問**: {clean_query}\n\n{response}\n\n*回答生成時刻: {time.strftime('%Y年%m月%d日 %H:%M:%S')}*"
+                    }
+                    headers = {'Content-Type': 'application/json; charset=utf-8'}
+                    r = requests.post(teams_webhook.webhook_url, json=simple_payload, headers=headers, timeout=30)
+                    logger.info(f"再試行結果: ステータスコード={r.status_code}")
+                except Exception as retry_err:
+                    logger.error(f"再試行にも失敗しました: {str(retry_err)}")
 
         else:
             logger.error("Teams Webhookが設定されていないため、通知できません")
@@ -108,3 +128,11 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
     except Exception as e:
         logger.error(f"非同期処理中にエラーが発生しました: {str(e)}")
         logger.error(traceback.format_exc())
+        
+        # エラー情報をTeamsに送信（可能であれば）
+        if teams_webhook:
+            try:
+                error_message = f"エラーが発生しました: {str(e)}\n\n詳細はサーバーログを確認してください。"
+                teams_webhook.send_ollama_response(clean_query, error_message, None, search_path)
+            except:
+                pass  # エラー通知に失敗した場合は、これ以上何もしない

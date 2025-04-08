@@ -1,4 +1,4 @@
-# onedrive_search.py - OneDriveファイル検索機能（日本語対応改善版）
+# onedrive_search.py - OneDriveファイル検索機能（pypdf対応版）
 import os
 import logging
 import subprocess
@@ -6,6 +6,8 @@ import re
 import time
 import json
 from datetime import datetime
+import tempfile
+import base64
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -59,6 +61,21 @@ class OneDriveSearch:
         # 検索結果キャッシュ（パフォーマンス向上のため）
         self.search_cache = {}
         self.cache_expiry = 300  # キャッシュの有効期限（秒）
+
+        # pypdfがインストールされているか確認
+        self.pypdf_available = self._check_pypdf_available()
+        if self.pypdf_available:
+            logger.info("pypdfが利用可能です - PDFテキスト抽出を有効化します")
+        else:
+            logger.warning("pypdfが利用できません - PDFテキスト抽出は無効です")
+
+    def _check_pypdf_available(self):
+        """pypdfがインストールされているか確認"""
+        try:
+            import pypdf
+            return True
+        except ImportError:
+            return False
 
     def search_files(self, keywords, file_types=None, max_results=None, use_cache=True):
         """
@@ -332,9 +349,9 @@ class OneDriveSearch:
                     logger.warning(f"代替エンコーディングで読み込みました: {file_path}")
                     return content
             else:
-                # バイナリファイルの場合はPowerShellを使用して内容を抽出
+                # バイナリファイルの場合はファイル形式に応じた処理
                 if ext in ['.pdf']:
-                    return self._extract_pdf_content(file_path)
+                    return self._extract_pdf_content_improved(file_path)
                 elif ext in ['.docx']:
                     return self._extract_word_content(file_path)
                 elif ext in ['.xlsx']:
@@ -355,6 +372,141 @@ class OneDriveSearch:
         except Exception as e:
             logger.error(f"ファイル読み込み中にエラーが発生しました: {str(e)}")
             return f"ファイル読み込みエラー: {str(e)}"
+
+    def _extract_pdf_content_improved(self, file_path):
+        """
+        PDFファイルからテキストを抽出する（pypdfを使用）
+        """
+        logger.info(f"PDFファイルからテキスト抽出を試みます: {file_path}")
+        
+        # 方法1: pypdfが利用可能ならそれを使う
+        if self.pypdf_available:
+            try:
+                import pypdf
+                
+                with open(file_path, 'rb') as file:
+                    pdf_reader = pypdf.PdfReader(file)
+                    text_content = []
+                    
+                    # ファイル情報
+                    text_content.append(f"PDF名: {os.path.basename(file_path)}")
+                    text_content.append(f"ページ数: {len(pdf_reader.pages)}ページ")
+                    text_content.append(f"最終更新日時: {time.ctime(os.path.getmtime(file_path))}")
+                    text_content.append("-" * 40)
+                    
+                    # 本文抽出（最大10ページまで）
+                    max_pages = min(10, len(pdf_reader.pages))
+                    for page_num in range(max_pages):
+                        page = pdf_reader.pages[page_num]
+                        try:
+                            page_text = page.extract_text()
+                            if page_text:
+                                text_content.append(f"[ページ {page_num + 1}]")
+                                text_content.append(page_text)
+                        except Exception as e:
+                            logger.error(f"ページ {page_num + 1} のテキスト抽出に失敗: {str(e)}")
+                    
+                    if len(pdf_reader.pages) > max_pages:
+                        text_content.append(f"... (残り {len(pdf_reader.pages) - max_pages} ページ省略)")
+                    
+                    return "\n".join(text_content)
+            except Exception as e:
+                logger.error(f"pypdfによるPDF抽出に失敗: {str(e)}")
+                # PowerShellによる抽出にフォールバック
+        
+        # 方法2: PowerShellを使用したPDF抽出（iTextSharpを使用）
+        try:
+            # 一時ファイルを作成してiTextSharpのスクリプトを格納
+            with tempfile.NamedTemporaryFile(suffix='.ps1', delete=False, mode='w') as ps_file:
+                ps_script = f"""
+                # 必要なコードの追加
+                Add-Type -Path "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System.IO.Compression.FileSystem\\v4.0_4.0.0.0__b77a5c561934e089\\System.IO.Compression.FileSystem.dll"
+                
+                try {{
+                    # PDFファイルの情報を取得
+                    $pdfFile = "{file_path.replace('\\', '\\\\')}"
+                    $fileInfo = Get-Item $pdfFile
+                    
+                    Write-Output "PDF名: $($fileInfo.Name)"
+                    Write-Output "ファイルサイズ: $($fileInfo.Length) bytes"
+                    Write-Output "最終更新日時: $($fileInfo.LastWriteTime)"
+                    Write-Output "----------------------------------------"
+                    
+                    # iTextSharpがインストールされているか確認
+                    $itextPath = "C:\\Program Files\\iTextSharp\\itextsharp.dll"
+                    if (Test-Path $itextPath) {{
+                        Add-Type -Path $itextPath
+                        
+                        # PDFテキスト抽出
+                        $reader = New-Object iTextSharp.text.pdf.PdfReader($pdfFile)
+                        $sb = New-Object System.Text.StringBuilder
+                        
+                        for ($page = 1; $page -le $reader.NumberOfPages; $page++) {{
+                            $sb.AppendLine("[ページ $page]")
+                            $text = [iTextSharp.text.pdf.parser.PdfTextExtractor]::GetTextFromPage($reader, $page)
+                            $sb.AppendLine($text)
+                            if ($page -ge 10) {{
+                                $sb.AppendLine("... (残りのページは省略)")
+                                break
+                            }}
+                        }}
+                        
+                        $reader.Close()
+                        Write-Output $sb.ToString()
+                    }} else {{
+                        Write-Output "iTextSharpが見つからないため、PDFからのテキスト抽出ができません。"
+                        Write-Output "ファイル内容: PDFファイルの内容は確認できませんが、ファイルは存在します。"
+                    }}
+                }} catch {{
+                    Write-Output "エラーが発生しました: $_"
+                }}
+                """
+                ps_file.write(ps_script)
+                ps_file_path = ps_file.name
+            
+            # PowerShellスクリプトの実行
+            process = subprocess.Popen(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_file_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False
+            )
+            
+            stdout, stderr = process.communicate()
+            
+            # 削除
+            try:
+                os.unlink(ps_file_path)
+            except:
+                pass
+            
+            # 出力処理
+            try:
+                content_text = stdout.decode('utf-8', errors='replace')
+                return content_text if content_text.strip() else f"PDF名: {os.path.basename(file_path)}\n内容: このPDFからはテキストを抽出できませんでした。"
+            except:
+                return f"PDF名: {os.path.basename(file_path)}\n内容: PDFの処理中にエラーが発生しました。"
+        
+        except Exception as e:
+            logger.error(f"PowerShellによるPDF抽出に失敗: {str(e)}")
+        
+        # 方法3: 最終手段 - ファイル情報のみ表示
+        try:
+            # PDF情報を表示
+            file_info = f"""PDF名: {os.path.basename(file_path)}
+ファイルサイズ: {os.path.getsize(file_path)} bytes
+最終更新日時: {time.ctime(os.path.getmtime(file_path))}
+----------------------------------------
+注意: このPDFからのテキスト抽出は失敗しましたが、ファイルは存在します。
+
+※テキスト抽出には特定のライブラリが必要です。以下のコマンドをサーバーで実行してください：
+pip install pypdf
+"""
+            return file_info
+        
+        except Exception as e:
+            logger.error(f"最終手段のPDF抽出にも失敗: {str(e)}")
+            return f"PDF名: {os.path.basename(file_path)}\n内容: PDFファイルが見つかりましたが、テキスト抽出はサポートされていません。"
 
     def _extract_file_content_helper(self, file_path, ps_command):
         """
@@ -399,102 +551,9 @@ class OneDriveSearch:
             logger.error(f"ファイル処理中にエラーが発生しました: {str(e)}")
             return f"ファイル処理エラー: {str(e)}"
 
-    def _extract_pdf_content(self, file_path):
-        """
-        PDFファイルからテキストを抽出する（改善版）
-        """
-        # ファイル情報を取得するPowerShellコマンド
-        info_cmd = f"""
-        $OutputEncoding = [System.Text.Encoding]::UTF8
-        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        try {{
-            # ファイルの存在確認
-            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "PDF名: " + [System.IO.Path]::GetFileName("{file_path}")
-                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                "----------------------------------------"
-            }} else {{
-                "ファイルが見つかりません: {file_path}"
-                exit
-            }}
-        }} catch {{
-            "エラーが発生しました: $_"
-        }}
-        """
-        
-        # ファイル情報を取得
-        file_info = self._extract_file_content_helper(file_path, info_cmd)
-        
-        # PowerShellを使ってPDFテキスト抽出を試みる（方法1）
-        extract_cmd1 = f"""
-        $OutputEncoding = [System.Text.Encoding]::UTF8
-        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        try {{
-            # Word Interopが利用可能かチェック
-            $wordInstalled = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
-            if (Test-Path (Join-Path $wordInstalled "Microsoft.Office.Interop.Word.dll")) {{
-                "Microsoft Wordを使用してPDFテキストを抽出しています..."
-                Add-Type -AssemblyName "Microsoft.Office.Interop.Word"
-                $word = New-Object -ComObject Word.Application
-                $word.Visible = $false
-                $doc = $word.Documents.Open("{file_path}", $false, $true)
-                $text = $doc.Content.Text
-                $doc.Close()
-                $word.Quit()
-                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word)
-                $text
-            }} else {{
-                # PowerShell 5.1以降でSystem.Text.Encoding.CodePagesを試す
-                try {{
-                    Add-Type -AssemblyName System.Text.Encoding.CodePages
-                    [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
-                    "iTextSharpを試みています..."
-                    # バイナリデータを最大1000文字まで出力
-                    $bytes = [System.IO.File]::ReadAllBytes("{file_path}")
-                    $hexOutput = [System.BitConverter]::ToString($bytes[0..100]) -replace "-", " "
-                    "PDF先頭バイナリ: $hexOutput"
-                    "PDFからのテキスト抽出はこのメソッドではサポートされていません。"
-                }} catch {{
-                    "PDFからのテキスト抽出がサポートされていません。"
-                }}
-            }}
-        }} catch {{
-            "PDFテキスト抽出中にエラーが発生しました: $_"
-        }}
-        """
-        
-        # 抽出を試みる
-        extract_result = self._extract_file_content_helper(file_path, extract_cmd1)
-        
-        # 抽出結果をチェック
-        if "PDFからのテキスト抽出はサポートされていません" in extract_result or extract_result.strip() == "":
-            # このファイルが存在することを明示するメッセージを追加
-            date_match = re.search(r'_(\d{8})\.pdf', file_path)
-            if date_match:
-                date_str = date_match.group(1)
-                year = date_str[:4]
-                month = date_str[4:6]
-                day = date_str[6:8]
-                
-                # ファイルは見つかったことを示すメッセージを作成
-                file_found_message = f"""
-【重要】{year}年{month}月{day}日の日報ファイルは存在しています。
-ファイル名: {os.path.basename(file_path)}
-場所: {os.path.dirname(file_path)}
-ファイルサイズ: {os.path.getsize(file_path)} bytes
-最終更新日時: {datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%Y-%m-%d %H:%M:%S')}
-
-このPDFファイルの内容を直接表示することはできませんが、ファイルは確かに存在しています。
-内容を確認するには、上記のファイルパスからPDFを直接開いてください。
-"""
-                return file_info + "\n\n" + file_found_message
-        
-        return file_info + "\n\n" + extract_result
-
     def _extract_word_content(self, file_path):
         """
-        Wordファイル(docx)からテキストを抽出する
+        Wordファイル(docx)からテキストを抽出する - 改善版
         """
         cmd = f"""
         try {{
@@ -504,8 +563,32 @@ class OneDriveSearch:
                 "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
                 "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
                 "----------------------------------------"
-                # Wordアプリケーションを使わず、基本情報のみ表示
-                "このWord文書からのテキスト抽出はサポートされていません"
+                
+                # Word.ApplicationがインストールされているかをWindows機能で確認
+                if (Get-WmiObject -Class Win32_Product | Where-Object {{ $_.Name -like "*Microsoft Office*" -or $_.Name -like "*Microsoft 365*" }}) {{
+                    try {{
+                        # Wordアプリケーションを起動
+                        $word = New-Object -ComObject Word.Application
+                        $word.Visible = $false
+                        $doc = $word.Documents.Open("{file_path}")
+                        $content = $doc.Content.Text
+                        $doc.Close()
+                        $word.Quit()
+                        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($word) | Out-Null
+                        
+                        # 内容の先頭を表示
+                        if ($content) {{
+                            "文書内容:"
+                            $content
+                        }} else {{
+                            "文書内容を取得できませんでした"
+                        }}
+                    }} catch {{
+                        "Word文書からのテキスト抽出中にエラー: $_"
+                    }}
+                }} else {{
+                    "Microsoft Wordがインストールされていないため、内容は抽出できません"
+                }}
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -517,7 +600,7 @@ class OneDriveSearch:
 
     def _extract_excel_content(self, file_path):
         """
-        Excelファイル(xlsx)から基本情報を抽出する
+        Excelファイル(xlsx)から基本情報と内容を抽出する - 改善版
         """
         cmd = f"""
         try {{
@@ -527,7 +610,53 @@ class OneDriveSearch:
                 "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
                 "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
                 "----------------------------------------"
-                "このExcelからのデータ抽出はサポートされていません"
+                
+                # Excel.ApplicationがインストールされているかをWindows機能で確認
+                if (Get-WmiObject -Class Win32_Product | Where-Object {{ $_.Name -like "*Microsoft Office*" -or $_.Name -like "*Microsoft 365*" }}) {{
+                    try {{
+                        # Excelアプリケーションを起動
+                        $excel = New-Object -ComObject Excel.Application
+                        $excel.Visible = $false
+                        $workbook = $excel.Workbooks.Open("{file_path}")
+                        
+                        "シート一覧:"
+                        foreach($sheet in $workbook.Sheets) {{
+                            "- " + $sheet.Name
+                        }}
+                        
+                        "先頭シートの内容抜粋:"
+                        $sheet = $workbook.Sheets.Item(1)
+                        $usedRange = $sheet.UsedRange
+                        $rows = $usedRange.Rows.Count
+                        $cols = $usedRange.Columns.Count
+                        
+                        # 最大20行、10列まで表示
+                        $maxRows = [Math]::Min(20, $rows)
+                        $maxCols = [Math]::Min(10, $cols)
+                        
+                        for ($r = 1; $r -le $maxRows; $r++) {{
+                            $rowData = ""
+                            for ($c = 1; $c -le $maxCols; $c++) {{
+                                $cell = $sheet.Cells.Item($r, $c)
+                                $value = $cell.Text
+                                $rowData += "$value`t"
+                            }}
+                            $rowData
+                        }}
+                        
+                        if ($rows > $maxRows -or $cols > $maxCols) {{
+                            "... (データが多いため一部省略)"
+                        }}
+                        
+                        $workbook.Close($false)
+                        $excel.Quit()
+                        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
+                    }} catch {{
+                        "Excelファイルからのデータ抽出中にエラー: $_"
+                    }}
+                }} else {{
+                    "Microsoft Excelがインストールされていないため、内容は抽出できません"
+                }}
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -539,7 +668,7 @@ class OneDriveSearch:
 
     def _extract_powerpoint_content(self, file_path):
         """
-        PowerPointファイル(pptx)から基本情報を抽出する
+        PowerPointファイル(pptx)から基本情報と内容を抽出する - 改善版
         """
         cmd = f"""
         try {{
@@ -549,7 +678,50 @@ class OneDriveSearch:
                 "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
                 "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
                 "----------------------------------------"
-                "このPowerPointからのテキスト抽出はサポートされていません"
+                
+                # PowerPoint.ApplicationがインストールされているかをWindows機能で確認
+                if (Get-WmiObject -Class Win32_Product | Where-Object {{ $_.Name -like "*Microsoft Office*" -or $_.Name -like "*Microsoft 365*" }}) {{
+                    try {{
+                        # PowerPointアプリケーションを起動
+                        $ppt = New-Object -ComObject PowerPoint.Application
+                        $presentation = $ppt.Presentations.Open("{file_path}")
+                        
+                        "スライド数: " + $presentation.Slides.Count
+                        
+                        # 最大10スライドまで内容を表示
+                        $maxSlides = [Math]::Min(10, $presentation.Slides.Count)
+                        
+                        for ($i = 1; $i -le $maxSlides; $i++) {{
+                            $slide = $presentation.Slides.Item($i)
+                            "-- スライド $i --"
+                            
+                            # タイトルを表示
+                            try {{
+                                foreach($shape in $slide.Shapes) {{
+                                    if ($shape.HasTextFrame) {{
+                                        if ($shape.TextFrame.HasText) {{
+                                            $shape.TextFrame.TextRange.Text
+                                        }}
+                                    }}
+                                }}
+                            }} catch {{
+                                "テキスト抽出エラー: $_"
+                            }}
+                        }}
+                        
+                        if ($presentation.Slides.Count > $maxSlides) {{
+                            "... (残り " + ($presentation.Slides.Count - $maxSlides) + " スライドは省略)"
+                        }}
+                        
+                        $presentation.Close()
+                        $ppt.Quit()
+                        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($ppt) | Out-Null
+                    }} catch {{
+                        "PowerPointからのテキスト抽出中にエラー: $_"
+                    }}
+                }} else {{
+                    "Microsoft PowerPointがインストールされていないため、内容は抽出できません"
+                }}
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -642,6 +814,7 @@ class OneDriveSearch:
             modified = result.get('modified', '不明')
 
             # ファイルの内容を読み込み
+            logger.info(f"ファイル{i+1}の内容を読み込みます: {file_path}")
             content = self.read_file_content(file_path)
 
             # コンテンツのプレビューを追加（文字数制限あり）
@@ -667,6 +840,28 @@ class OneDriveSearch:
             total_chars += len(file_content)
 
         return relevant_content
+
+    def install_pypdf(self):
+        """pypdfをインストール試行（必要に応じて）"""
+        try:
+            import pypdf
+            logger.info("pypdfは既にインストールされています")
+            self.pypdf_available = True
+            return True
+        except ImportError:
+            logger.warning("pypdfがインストールされていません。インストールを試みます...")
+            try:
+                result = subprocess.call(["pip", "install", "pypdf"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result == 0:
+                    logger.info("pypdfのインストールに成功しました")
+                    self.pypdf_available = True
+                    return True
+                else:
+                    logger.error("pypdfのインストールに失敗しました")
+                    return False
+            except Exception as e:
+                logger.error(f"pypdfのインストール中にエラー: {str(e)}")
+                return False
 
 # 使用例
 if __name__ == "__main__":
