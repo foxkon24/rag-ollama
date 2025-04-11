@@ -114,6 +114,29 @@ class OneDriveSearch:
                     date_pattern2 = f"{year}-{month}-{day}"
                     date_pattern3 = f"{year}/{month}/{day}"
                     date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
+            # YYYY/MM/DD形式を抽出    
+            elif re.search(r'\d{4}[/\-]\d{1,2}[/\-]\d{1,2}', k):
+                date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', k)
+                if date_match:
+                    year = date_match.group(1)
+                    month = date_match.group(2).zfill(2)
+                    day = date_match.group(3).zfill(2)
+                    date_pattern = f"{year}{month}{day}"
+                    date_pattern2 = f"{year}-{month}-{day}"
+                    date_pattern3 = f"{year}/{month}/{day}"
+                    date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
+            # YYYYMMDD形式（8桁の数字）を抽出
+            elif re.search(r'^\d{8}$', k) and int(k[:4]) >= 2000 and int(k[:4]) <= 2100:
+                # 8桁の数字で、最初の4桁が2000〜2100の間（年として妥当）
+                year = k[:4]
+                month = k[4:6]
+                day = k[6:8]
+                if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
+                    date_pattern = k  # そのまま（YYYYMMDD）
+                    date_pattern2 = f"{year}-{month}-{day}"
+                    date_pattern3 = f"{year}/{month}/{day}"
+                    date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
+                    logger.info(f"8桁数字の日付形式を検出: {k} → {date_pattern2}")
             else:
                 # 日本語検索キーワードは短くして検索精度を上げる
                 if len(k) > 2 and re.search(r'[ぁ-んァ-ン一-龥]', k):
@@ -126,6 +149,10 @@ class OneDriveSearch:
         # 検索キーワードがない場合、元のキーワードの先頭2つを使用
         if not search_terms and keywords:
             search_terms = keywords[:2]
+
+        # 「日報」キーワードを追加（存在しない場合）
+        if "日報" not in " ".join(search_terms).lower() and any("日報" in kw for kw in keywords):
+            search_terms.append("日報")
 
         # 最低1つのキーワードを確保
         if not search_terms and isinstance(keywords, str) and keywords:
@@ -193,6 +220,9 @@ class OneDriveSearch:
             else:
                 full_condition = search_condition
 
+            # デバッグ情報をログに出力
+            logger.info(f"検索条件: {full_condition}")
+            
             # PowerShellコマンドの構築（改善版）- ファイル拡張子も取得
             ps_command = f"""
             $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -200,9 +230,15 @@ class OneDriveSearch:
             $ErrorActionPreference = "Continue"
             $results = @()
             try {{
+                Write-Output "検索開始: {search_path}"
                 $files = Get-ChildItem -Path "{search_path}" -Recurse -File -ErrorAction SilentlyContinue
+                Write-Output ("総ファイル数: " + $files.Count)
+                
                 $filtered = $files | Where-Object {{ {full_condition} }} | Select-Object -First {max_results}
+                Write-Output ("フィルター後: " + $filtered.Count + "件")
+                
                 foreach ($file in $filtered) {{
+                    Write-Output ("見つかったファイル: " + $file.Name)
                     $results += @{{
                         path = $file.FullName
                         name = $file.Name
@@ -510,8 +546,24 @@ class OneDriveSearch:
         if max_files is None:
             max_files = self.max_results
 
-        # 日付を抽出（YYYY年MM月DD日）
+        # 日付を抽出（YYYY年MM月DD日 または YYYY/MM/DD または YYYYMMDD）
         date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+        if not date_match:
+            # YYYY/MM/DD形式を検索
+            date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', query)
+            if not date_match:
+                # YYYYMMDD形式（8桁の数字）を検索
+                for word in query.split():
+                    if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
+                        # 8桁の数字で、最初の4桁が2000〜2100の間（年として妥当）
+                        year = word[:4]
+                        month = word[4:6]
+                        day = word[6:8]
+                        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
+                            date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
+                            logger.info(f"8桁数字の日付形式を検出: {word}")
+                            break
+        
         date_str = None
 
         if date_match:
@@ -527,29 +579,37 @@ class OneDriveSearch:
                      "内容", "知りたい", "あったのか", "何", "教えて", "どのような", "どんな", "ありました",
                      "the", "a", "an", "and", "or", "of", "to", "in", "for", "on", "by"]
 
-        # クエリから重要な単語を抽出
+        # クエリから重要な単語を抽出（個人名を除外した強化版）
         keywords = []
-
+        
         # 先に日付を追加（もし存在すれば）
         if date_str:
             keywords.append(date_str)
+            # 日付の別形式も追加（YYYY-MM-DD, YYYY/MM/DD）
+            if date_match:
+                year = date_match.group(1)
+                month = date_match.group(2).zfill(2)
+                day = date_match.group(3).zfill(2)
+                keywords.append(f"{year}{month}{day}")  # YYYYMMDD
+                keywords.append(f"{year}-{month}-{day}")  # YYYY-MM-DD
+                keywords.append(f"{year}/{month}/{day}")  # YYYY/MM/DD
+                logger.info(f"日付形式のバリエーションを追加: {year}{month}{day}, {year}-{month}-{day}, {year}/{month}/{day}")
+
+        # 「日報」キーワードは重要なので確実に追加
+        if "日報" in query.lower() and "日報" not in keywords:
+            keywords.append("日報")
+            logger.info("'日報'キーワードを追加")
 
         # その他のキーワードを追加
         for word in query.split():
             clean_word = word.strip(',.;:!?()[]{}"\'')
             if clean_word and len(clean_word) > 1 and clean_word.lower() not in stop_words:
-                # 日付文字列の一部でなければ追加
-                if date_str and date_str not in clean_word:
-                    keywords.append(clean_word)
-                elif not date_str:
-                    keywords.append(clean_word)
-                else:
-                    pass
-
-        # キーワードが少なすぎる場合のバックアップとして日報関連の単語を追加
-        if len(keywords) < 2:
-            if "日報" not in query.lower() and not any(k for k in keywords if "日報" in k):
-                keywords.append("日報")
+                # 既に追加済みでなければ追加
+                if clean_word not in keywords and date_str not in clean_word:
+                    # YYYYMMDD形式の日付はスキップ（既に別形式で追加済み）
+                    if not (re.search(r'^\d{8}$', clean_word) and int(clean_word[:4]) >= 2000):
+                        keywords.append(clean_word)
+                        logger.info(f"追加キーワード: {clean_word}")
 
         if not keywords:
             return "検索キーワードが見つかりませんでした。具体的な日付や単語で検索してください。"

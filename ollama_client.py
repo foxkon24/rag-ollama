@@ -36,16 +36,46 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
             search_path = onedrive_search.base_directory
             short_path = get_shortened_path(search_path)
             
-            # 日付を含むかどうかを確認（日報検索に重要）
-            has_date = bool(re.search(r'\d{4}年\d{1,2}月\d{1,2}日', clean_query))
+            # 日付を含むかどうかを確認（日報検索に重要）- 複数の形式に対応
+            has_date = bool(re.search(r'\d{4}年\d{1,2}月\d{1,2}日', clean_query)) or bool(re.search(r'\d{4}[/\-]\d{1,2}[/\-]\d{1,2}', clean_query))
+            
+            # YYYYMMDD形式（8桁の数字）の日付も検出
+            if not has_date:
+                for word in clean_query.split():
+                    if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
+                        # 8桁の数字で、最初の4桁が2000〜2100の間（年として妥当）
+                        year = word[:4]
+                        month = word[4:6]
+                        day = word[6:8]
+                        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
+                            has_date = True
+                            logger.info(f"8桁数字の日付形式を検出: {word}")
+                            break
+            
             date_str = None
             if has_date:
+                # まずYYYY年MM月DD日形式をチェック
                 date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
+                if not date_match:
+                    # 次にYYYY/MM/DD形式をチェック
+                    date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', clean_query)
+                    if not date_match:
+                        # YYYYMMDD形式を検索
+                        for word in clean_query.split():
+                            if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
+                                year = word[:4]
+                                month = word[4:6]
+                                day = word[6:8]
+                                if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
+                                    date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
+                                    break
+                
                 if date_match:
                     year = date_match.group(1)
                     month = date_match.group(2)
                     day = date_match.group(3)
                     date_str = f"{year}年{month}月{day}日"
+                    logger.info(f"日付形式を検出: {date_str} (元の形式: {date_match.group(0)})")
             
             # OneDriveから関連情報を取得
             logger.info(f"OneDriveから関連情報を検索: {clean_query} (日付指定: {has_date})")
@@ -73,7 +103,27 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                 else:
                     # ファイルが見つからない場合は見つからないことを明示
                     if has_date:
-                        onedrive_context = f"\n\n注意: {date_str}の日報は検索ディレクトリ（{short_path}）から見つかりませんでした。"
+                        # 日付から数字だけを抽出して表示 - 複数の形式に対応
+                        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
+                        if not date_match:
+                            date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', clean_query)
+                            if not date_match:
+                                # YYYYMMDD形式を検索
+                                for word in clean_query.split():
+                                    if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
+                                        year = word[:4]
+                                        month = word[4:6]
+                                        day = word[6:8]
+                                        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
+                                            date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
+                                            break
+                            
+                        if date_match:
+                            year = date_match.group(1)
+                            month = date_match.group(2)
+                            day = date_match.group(3)
+                            date_str = f"{year}年{month}月{day}日"
+                            onedrive_context = f"\n\n注意: {date_str}の日報は検索ディレクトリ（{short_path}）から見つかりませんでした。"
                     else:
                         onedrive_context = f"\n\n注意: 関連する日報ファイルは検索ディレクトリ（{short_path}）から見つかりませんでした。"
                     
@@ -108,6 +158,19 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                 if files_found and pdf_detected:
                     # PDFが見つかった場合
                     date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
+                    if not date_match:
+                        date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', clean_query)
+                        if not date_match:
+                            # YYYYMMDD形式を検索
+                            for word in clean_query.split():
+                                if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
+                                    year = word[:4]
+                                    month = word[4:6]
+                                    day = word[6:8]
+                                    if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
+                                        date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
+                                        break
+                        
                     if date_match:
                         year = date_match.group(1)
                         month = date_match.group(2)
@@ -145,6 +208,19 @@ PDFのテキスト抽出はできないため具体的な内容については�
                 else:
                     # ファイルが見つからない場合
                     date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
+                    if not date_match:
+                        date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', clean_query)
+                        if not date_match:
+                            # YYYYMMDD形式を検索
+                            for word in clean_query.split():
+                                if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
+                                    year = word[:4]
+                                    month = word[4:6]
+                                    day = word[6:8]
+                                    if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
+                                        date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
+                                        break
+                        
                     if date_match:
                         year = date_match.group(1)
                         month = date_match.group(2)
@@ -312,6 +388,19 @@ Ollamaを使うと、プライバシーを保ちながら、AI機能を様々な
     # 日報に関する質問のフォールバック
     elif "日報" in query:
         date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+        if not date_match:
+            date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', query)
+            if not date_match:
+                # YYYYMMDD形式を検索
+                for word in query.split():
+                    if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
+                        year = word[:4]
+                        month = word[4:6]
+                        day = word[6:8]
+                        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
+                            date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
+                            break
+            
         if date_match:
             year = date_match.group(1)
             month = date_match.group(2)
