@@ -1,4 +1,4 @@
-# ollama_client.py - Ollamaとの通信と応答生成（日本語クエリ改善版）
+# ollama_client.py - Ollamaとの通信と応答生成（ファイル抽出改善版）
 import logging
 import requests
 import traceback
@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, onedrive_search=None):
     """
-    Ollamaを使用して回答を生成する（日本語クエリ改善版）
+    Ollamaを使用して回答を生成する（ファイル抽出改善版）
 
     Args:
         query: ユーザーからの質問
@@ -36,88 +36,24 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
             search_path = onedrive_search.base_directory
             short_path = get_shortened_path(search_path)
             
-            # 日付を含むかどうかを確認（日報検索に重要）- 複数の形式に対応
-            has_date = bool(re.search(r'\d{4}年\d{1,2}月\d{1,2}日', clean_query)) or bool(re.search(r'\d{4}[/\-]\d{1,2}[/\-]\d{1,2}', clean_query))
-            
-            # YYYYMMDD形式（8桁の数字）の日付も検出
-            if not has_date:
-                for word in clean_query.split():
-                    if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
-                        # 8桁の数字で、最初の4桁が2000〜2100の間（年として妥当）
-                        year = word[:4]
-                        month = word[4:6]
-                        day = word[6:8]
-                        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
-                            has_date = True
-                            logger.info(f"8桁数字の日付形式を検出: {word}")
-                            break
-            
-            date_str = None
-            if has_date:
-                # まずYYYY年MM月DD日形式をチェック
-                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
-                if not date_match:
-                    # 次にYYYY/MM/DD形式をチェック
-                    date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', clean_query)
-                    if not date_match:
-                        # YYYYMMDD形式を検索
-                        for word in clean_query.split():
-                            if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
-                                year = word[:4]
-                                month = word[4:6]
-                                day = word[6:8]
-                                if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
-                                    date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
-                                    break
-                
-                if date_match:
-                    year = date_match.group(1)
-                    month = date_match.group(2)
-                    day = date_match.group(3)
-                    date_str = f"{year}年{month}月{day}日"
-                    logger.info(f"日付形式を検出: {date_str} (元の形式: {date_match.group(0)})")
+            # 日付を含むかどうかを確認（日報検索に重要）
+            has_date = bool(re.search(r'\d{4}年\d{1,2}月\d{1,2}日', clean_query))
             
             # OneDriveから関連情報を取得
             logger.info(f"OneDriveから関連情報を検索: {clean_query} (日付指定: {has_date})")
             try:
                 relevant_content = onedrive_search.get_relevant_content(clean_query)
-                
-                # PDF検出用の正規表現
-                pdf_detected = re.search(r'PDFファイル.*が見つかりました', relevant_content) is not None or \
-                               'このファイルはPDF' in relevant_content
-                
-                # ファイルが見つかったかどうかを確認
-                files_found = "件の関連ファイルが見つかりました" in relevant_content
-                
-                if files_found:
-                    # PDFファイルが見つかった場合、特別なメッセージを追加
-                    if pdf_detected and date_str:
-                        onedrive_context = f"\n\n参考資料（OneDriveから取得 - {short_path}）:\n{relevant_content}\n"
-                        onedrive_context += f"\n注意: {date_str}の日報はPDFファイルとして見つかりましたが、内容のテキスト抽出はできません。"
-                        onedrive_context += f"PDFファイルが存在することは確認できています。"
-                        logger.info(f"PDFファイルを検出しました。特別なメッセージを追加します。")
-                    else:
-                        onedrive_context = f"\n\n参考資料（OneDriveから取得 - {short_path}）:\n{relevant_content}"
-                    
+                if relevant_content and "件の関連ファイルが見つかりました" in relevant_content:
+                    onedrive_context = f"\n\n参考資料（OneDriveから取得 - {short_path}）:\n{relevant_content}"
                     logger.info(f"OneDriveから関連情報を取得: {len(onedrive_context)}文字")
+                    # ファイル内容の抽出状況をログに記録
+                    content_check = "内容抽出成功" if "ファイル名:" in relevant_content else "内容抽出に問題あり"
+                    logger.info(f"ファイル内容抽出状況: {content_check}")
                 else:
                     # ファイルが見つからない場合は見つからないことを明示
                     if has_date:
-                        # 日付から数字だけを抽出して表示 - 複数の形式に対応
+                        # 日付から数字だけを抽出して表示
                         date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
-                        if not date_match:
-                            date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', clean_query)
-                            if not date_match:
-                                # YYYYMMDD形式を検索
-                                for word in clean_query.split():
-                                    if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
-                                        year = word[:4]
-                                        month = word[4:6]
-                                        day = word[6:8]
-                                        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
-                                            date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
-                                            break
-                            
                         if date_match:
                             year = date_match.group(1)
                             month = date_match.group(2)
@@ -150,83 +86,25 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 - APIを通じて他のアプリケーションから利用できる{onedrive_context}"""
         else:
             # 日報に関する質問の特別処理
-            if "日報" in clean_query and onedrive_context:
-                # PDF検出用の正規表現
-                pdf_detected = "PDFファイル" in onedrive_context and "見つかりました" in onedrive_context
-                files_found = "件の関連ファイルが見つかりました" in onedrive_context
-                
-                if files_found and pdf_detected:
-                    # PDFが見つかった場合
-                    date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
-                    if not date_match:
-                        date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', clean_query)
-                        if not date_match:
-                            # YYYYMMDD形式を検索
-                            for word in clean_query.split():
-                                if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
-                                    year = word[:4]
-                                    month = word[4:6]
-                                    day = word[6:8]
-                                    if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
-                                        date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
-                                        break
-                        
-                    if date_match:
-                        year = date_match.group(1)
-                        month = date_match.group(2)
-                        day = date_match.group(3)
-                        date_str = f"{year}年{month}月{day}日"
-                        
-                        prompt = f"""以下の質問に日本語で丁寧に回答してください。
-
-質問: {clean_query}
-
-{onedrive_context}
-
-上記の情報を元に回答してください。重要：{date_str}の日報はPDFファイルとして見つかりましたが、PDFの内容を直接テキスト抽出することはできません。
-ファイルが存在していることは確認できましたので、PDFファイルが存在する旨をユーザーに伝えてください。
-テキスト抽出ができないため、具体的な内容については回答できないことを明記してください。"""
-                    else:
-                        prompt = f"""以下の質問に日本語で丁寧に回答してください。
-
-質問: {clean_query}
-
-{onedrive_context}
-
-上記の参考資料を基に具体的に回答してください。PDFファイルが見つかった場合は、ファイルが存在していることを伝えますが、
-PDFのテキスト抽出はできないため具体的な内容については回答できないことを明記してください。"""
-                elif files_found:
-                    # 通常のファイルが見つかった場合
-                    prompt = f"""以下の質問に日本語で丁寧に回答してください。
+            if "日報" in clean_query and onedrive_context and "件の関連ファイルが見つかりました" in onedrive_context:
+                prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
 {onedrive_context}
 
 上記の参考資料を基に具体的に回答してください。特に日付や内容を明確に述べてください。
+ファイルから抽出した情報を正確に使用し、日付、報告者、作業内容、時間などの情報を具体的に引用してください。
 参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください。"""
-                else:
-                    # ファイルが見つからない場合
-                    date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
-                    if not date_match:
-                        date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', clean_query)
-                        if not date_match:
-                            # YYYYMMDD形式を検索
-                            for word in clean_query.split():
-                                if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
-                                    year = word[:4]
-                                    month = word[4:6]
-                                    day = word[6:8]
-                                    if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
-                                        date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
-                                        break
-                        
-                    if date_match:
-                        year = date_match.group(1)
-                        month = date_match.group(2)
-                        day = date_match.group(3)
-                        short_path = get_shortened_path(search_path)
-                        prompt = f"""以下の質問に日本語で丁寧に回答してください。
+            elif "日報" in clean_query and not ("件の関連ファイルが見つかりました" in onedrive_context):
+                # 日報が見つからない場合
+                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
+                if date_match:
+                    year = date_match.group(1)
+                    month = date_match.group(2)
+                    day = date_match.group(3)
+                    short_path = get_shortened_path(search_path)
+                    prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
@@ -238,9 +116,9 @@ PDFのテキスト抽出はできないため具体的な内容については�
 4. アクセス権限の問題でファイルが見つけられない
 
 この日付の日報内容については情報がないため、お答えできません。別の日付をお試しいただくか、システム管理者にお問い合わせください。"""
-                    else:
-                        short_path = get_shortened_path(search_path)
-                        prompt = f"""以下の質問に日本語で丁寧に回答してください。
+                else:
+                    short_path = get_shortened_path(search_path)
+                    prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
 質問: {clean_query}
 
@@ -255,8 +133,8 @@ PDFのテキスト抽出はできないため具体的な内容については�
 
 {onedrive_context}
 
-上記の参考資料を基に質問に回答してください。参考資料に関連情報がない場合は、あなたの知識を使って回答してください。
-PDFファイルやOfficeファイルが見つかった場合は、それらのファイルが存在することは伝えても、内容の詳細は抽出できないことを明記してください。"""
+上記の参考資料を基に質問に回答してください。ファイル内容から抽出された情報を正確に引用し、具体的に説明してください。
+参考資料に関連情報がない場合は、あなたの知識を使って回答してください。"""
                 else:
                     prompt = clean_query
 
@@ -388,19 +266,6 @@ Ollamaを使うと、プライバシーを保ちながら、AI機能を様々な
     # 日報に関する質問のフォールバック
     elif "日報" in query:
         date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
-        if not date_match:
-            date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', query)
-            if not date_match:
-                # YYYYMMDD形式を検索
-                for word in query.split():
-                    if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
-                        year = word[:4]
-                        month = word[4:6]
-                        day = word[6:8]
-                        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
-                            date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
-                            break
-            
         if date_match:
             year = date_match.group(1)
             month = date_match.group(2)

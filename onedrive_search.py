@@ -1,4 +1,4 @@
-# onedrive_search.py - OneDriveファイル検索機能（日本語対応改善版）
+# onedrive_search.py - OneDriveファイル検索機能（file_extractorと連携）
 import os
 import logging
 import subprocess
@@ -6,6 +6,7 @@ import re
 import time
 import json
 from datetime import datetime
+from file_extractor import FileExtractor
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -59,6 +60,10 @@ class OneDriveSearch:
         # 検索結果キャッシュ（パフォーマンス向上のため）
         self.search_cache = {}
         self.cache_expiry = 300  # キャッシュの有効期限（秒）
+        
+        # ファイル抽出器の初期化
+        self.file_extractor = FileExtractor()
+        logger.info("ファイル抽出器を初期化しました")
 
     def search_files(self, keywords, file_types=None, max_results=None, use_cache=True):
         """
@@ -71,7 +76,7 @@ class OneDriveSearch:
             use_cache: キャッシュを使用するかどうか
 
         Returns:
-            検索結果のリスト [{'path': ファイルパス, 'name': ファイル名, 'modified': 更新日時, 'extension': 拡張子}]
+            検索結果のリスト [{'path': ファイルパス, 'name': ファイル名, 'modified': 更新日時}]
         """
         # デフォルト値の設定
         if file_types is None:
@@ -114,29 +119,6 @@ class OneDriveSearch:
                     date_pattern2 = f"{year}-{month}-{day}"
                     date_pattern3 = f"{year}/{month}/{day}"
                     date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
-            # YYYY/MM/DD形式を抽出    
-            elif re.search(r'\d{4}[/\-]\d{1,2}[/\-]\d{1,2}', k):
-                date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', k)
-                if date_match:
-                    year = date_match.group(1)
-                    month = date_match.group(2).zfill(2)
-                    day = date_match.group(3).zfill(2)
-                    date_pattern = f"{year}{month}{day}"
-                    date_pattern2 = f"{year}-{month}-{day}"
-                    date_pattern3 = f"{year}/{month}/{day}"
-                    date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
-            # YYYYMMDD形式（8桁の数字）を抽出
-            elif re.search(r'^\d{8}$', k) and int(k[:4]) >= 2000 and int(k[:4]) <= 2100:
-                # 8桁の数字で、最初の4桁が2000〜2100の間（年として妥当）
-                year = k[:4]
-                month = k[4:6]
-                day = k[6:8]
-                if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
-                    date_pattern = k  # そのまま（YYYYMMDD）
-                    date_pattern2 = f"{year}-{month}-{day}"
-                    date_pattern3 = f"{year}/{month}/{day}"
-                    date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
-                    logger.info(f"8桁数字の日付形式を検出: {k} → {date_pattern2}")
             else:
                 # 日本語検索キーワードは短くして検索精度を上げる
                 if len(k) > 2 and re.search(r'[ぁ-んァ-ン一-龥]', k):
@@ -149,10 +131,6 @@ class OneDriveSearch:
         # 検索キーワードがない場合、元のキーワードの先頭2つを使用
         if not search_terms and keywords:
             search_terms = keywords[:2]
-
-        # 「日報」キーワードを追加（存在しない場合）
-        if "日報" not in " ".join(search_terms).lower() and any("日報" in kw for kw in keywords):
-            search_terms.append("日報")
 
         # 最低1つのキーワードを確保
         if not search_terms and isinstance(keywords, str) and keywords:
@@ -220,31 +198,21 @@ class OneDriveSearch:
             else:
                 full_condition = search_condition
 
-            # デバッグ情報をログに出力
-            logger.info(f"検索条件: {full_condition}")
-            
-            # PowerShellコマンドの構築（改善版）- ファイル拡張子も取得
+            # PowerShellコマンドの構築（改善版）
             ps_command = f"""
             $OutputEncoding = [System.Text.Encoding]::UTF8
             [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
             $ErrorActionPreference = "Continue"
             $results = @()
             try {{
-                Write-Output "検索開始: {search_path}"
                 $files = Get-ChildItem -Path "{search_path}" -Recurse -File -ErrorAction SilentlyContinue
-                Write-Output ("総ファイル数: " + $files.Count)
-                
                 $filtered = $files | Where-Object {{ {full_condition} }} | Select-Object -First {max_results}
-                Write-Output ("フィルター後: " + $filtered.Count + "件")
-                
                 foreach ($file in $filtered) {{
-                    Write-Output ("見つかったファイル: " + $file.Name)
                     $results += @{{
                         path = $file.FullName
                         name = $file.Name
                         modified = $file.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
                         size = $file.Length
-                        extension = $file.Extension.ToLower()
                     }}
                 }}
                 ConvertTo-Json -InputObject $results -Depth 2
@@ -317,7 +285,7 @@ class OneDriveSearch:
             # 結果のフォーマットと表示
             logger.info(f"検索結果: {len(results)}件")
             for i, result in enumerate(results[:3]):  # 最初の3件のみログ表示
-                logger.info(f"結果{i+1}: {result.get('name')} - {result.get('path')} - {result.get('extension', '不明')}")
+                logger.info(f"結果{i+1}: {result.get('name')} - {result.get('path')}")
 
             # キャッシュに保存
             self.search_cache[cache_key] = {
@@ -334,7 +302,7 @@ class OneDriveSearch:
 
     def read_file_content(self, file_path):
         """
-        ファイルの内容を読み込む
+        ファイル抽出器を使用してファイルの内容を読み込む
 
         Args:
             file_path: 読み込むファイルパス
@@ -343,192 +311,13 @@ class OneDriveSearch:
             ファイルの内容（文字列）
         """
         try:
-            # ファイルの拡張子を取得
-            _, ext = os.path.splitext(file_path.lower())
-
-            # テキストファイル形式かどうか判定
-            text_extensions = ['.txt', '.md', '.csv', '.json', '.xml', '.html', '.htm', '.log', '.py', '.js', '.css']
-            is_text = ext in text_extensions
-
-            if is_text:
-                # テキストファイルとして読み込み
-                encodings = ['utf-8', 'shift-jis', 'cp932', 'euc-jp', 'iso-2022-jp']
-
-                for encoding in encodings:
-                    try:
-                        with open(file_path, 'r', encoding=encoding, errors='replace') as f:
-                            content = f.read()
-                            logger.info(f"テキストファイルとして読み込みました ({encoding}): {file_path}")
-                            return content
-                    except UnicodeDecodeError:
-                        continue
-
-                # 全てのエンコーディングで失敗した場合
-                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                    content = f.read()
-                    logger.warning(f"代替エンコーディングで読み込みました: {file_path}")
-                    return content
-            else:
-                # バイナリファイルの場合はPowerShellを使用して内容を抽出
-                if ext in ['.pdf']:
-                    return self._extract_pdf_content(file_path)
-                elif ext in ['.docx']:
-                    return self._extract_word_content(file_path)
-                elif ext in ['.xlsx']:
-                    return self._extract_excel_content(file_path)
-                elif ext in ['.pptx']:
-                    return self._extract_powerpoint_content(file_path)
-                else:
-                    # サポートされていないファイル形式
-                    logger.warning(f"サポートされていないファイル形式です: {ext}")
-                    return f"このファイル形式({ext})は直接読み込めません。"
-
-        except PermissionError:
-            logger.error(f"ファイル '{file_path}' へのアクセス権限がありません")
-            return f"ファイル '{os.path.basename(file_path)}' へのアクセス権限がありません。システム管理者に確認してください。"
-        except FileNotFoundError:
-            logger.error(f"ファイル '{file_path}' が見つかりません")
-            return f"ファイル '{os.path.basename(file_path)}' が見つかりません。削除または移動された可能性があります。"
+            # ファイル抽出器を使用
+            content = self.file_extractor.extract_file_content(file_path)
+            logger.info(f"ファイル抽出器を使用して読み込みました: {file_path}")
+            return content
         except Exception as e:
             logger.error(f"ファイル読み込み中にエラーが発生しました: {str(e)}")
             return f"ファイル読み込みエラー: {str(e)}"
-
-    def _extract_file_content_helper(self, file_path, ps_command):
-        """
-        PowerShellを使用してファイル内容を抽出する共通ヘルパー
-
-        Args:
-            file_path: ファイルパス
-            ps_command: 実行するPowerShellコマンド
-
-        Returns:
-            抽出したテキスト
-        """
-        try:
-            # PowerShellにエンコーディング設定を追加
-            ps_command = f"$OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {ps_command}"
-            
-            process = subprocess.Popen(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps_command],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False  # バイナリモード
-            )
-
-            stdout, stderr = process.communicate()
-
-            # エンコーディング処理
-            try:
-                for encoding in ['utf-8', 'shift-jis', 'cp932']:
-                    try:
-                        result = stdout.decode(encoding, errors='replace')
-                        if result:
-                            return result
-                    except:
-                        continue
-                
-                # デフォルトフォールバック
-                return stdout.decode('utf-8', errors='replace')
-            except:
-                return "ファイル内容のデコードに失敗しました。"
-
-        except Exception as e:
-            logger.error(f"ファイル処理中にエラーが発生しました: {str(e)}")
-            return f"ファイル処理エラー: {str(e)}"
-
-    def _extract_pdf_content(self, file_path):
-        """
-        PDFファイルからテキストを抽出する（簡易版）
-        """
-        cmd = f"""
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        try {{
-            # ファイルの存在確認
-            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "PDF名: {os.path.basename(file_path)}"
-                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                "----------------------------------------"
-                "このPDFファイルが存在します。ただし、内容のテキスト抽出はサポートされていません。"
-                "PDFが見つかりました: {file_path}"
-            }} else {{
-                "ファイルが見つかりません: {file_path}"
-            }}
-        }} catch {{
-            "エラーが発生しました: $_"
-        }}
-        """
-        return self._extract_file_content_helper(file_path, cmd)
-
-    def _extract_word_content(self, file_path):
-        """
-        Wordファイル(docx)からテキストを抽出する
-        """
-        cmd = f"""
-        try {{
-            # ファイルの存在確認
-            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "Word文書名: {os.path.basename(file_path)}"
-                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                "----------------------------------------"
-                # Wordアプリケーションを使わず、基本情報のみ表示
-                "このWord文書ファイルが存在します。ただし、内容のテキスト抽出はサポートされていません。"
-                "Word文書が見つかりました: {file_path}"
-            }} else {{
-                "ファイルが見つかりません: {file_path}"
-            }}
-        }} catch {{
-            "エラーが発生しました: $_"
-        }}
-        """
-        return self._extract_file_content_helper(file_path, cmd)
-
-    def _extract_excel_content(self, file_path):
-        """
-        Excelファイル(xlsx)から基本情報を抽出する
-        """
-        cmd = f"""
-        try {{
-            # ファイルの存在確認
-            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "Excel名: {os.path.basename(file_path)}"
-                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                "----------------------------------------"
-                "このExcelファイルが存在します。ただし、内容のデータ抽出はサポートされていません。"
-                "Excelファイルが見つかりました: {file_path}"
-            }} else {{
-                "ファイルが見つかりません: {file_path}"
-            }}
-        }} catch {{
-            "エラーが発生しました: $_"
-        }}
-        """
-        return self._extract_file_content_helper(file_path, cmd)
-
-    def _extract_powerpoint_content(self, file_path):
-        """
-        PowerPointファイル(pptx)から基本情報を抽出する
-        """
-        cmd = f"""
-        try {{
-            # ファイルの存在確認
-            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
-                "PowerPoint名: {os.path.basename(file_path)}"
-                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
-                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
-                "----------------------------------------"
-                "このPowerPointファイルが存在します。ただし、内容のテキスト抽出はサポートされていません。"
-                "PowerPointファイルが見つかりました: {file_path}"
-            }} else {{
-                "ファイルが見つかりません: {file_path}"
-            }}
-        }} catch {{
-            "エラーが発生しました: $_"
-        }}
-        """
-        return self._extract_file_content_helper(file_path, cmd)
 
     def get_relevant_content(self, query, max_files=None, max_chars=8000):
         """
@@ -546,24 +335,8 @@ class OneDriveSearch:
         if max_files is None:
             max_files = self.max_results
 
-        # 日付を抽出（YYYY年MM月DD日 または YYYY/MM/DD または YYYYMMDD）
+        # 日付を抽出（YYYY年MM月DD日）
         date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
-        if not date_match:
-            # YYYY/MM/DD形式を検索
-            date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', query)
-            if not date_match:
-                # YYYYMMDD形式（8桁の数字）を検索
-                for word in query.split():
-                    if re.search(r'^\d{8}$', word) and int(word[:4]) >= 2000 and int(word[:4]) <= 2100:
-                        # 8桁の数字で、最初の4桁が2000〜2100の間（年として妥当）
-                        year = word[:4]
-                        month = word[4:6]
-                        day = word[6:8]
-                        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:  # 妥当な月日かチェック
-                            date_match = re.match(r'(\d{4})(\d{2})(\d{2})', word)
-                            logger.info(f"8桁数字の日付形式を検出: {word}")
-                            break
-        
         date_str = None
 
         if date_match:
@@ -579,37 +352,29 @@ class OneDriveSearch:
                      "内容", "知りたい", "あったのか", "何", "教えて", "どのような", "どんな", "ありました",
                      "the", "a", "an", "and", "or", "of", "to", "in", "for", "on", "by"]
 
-        # クエリから重要な単語を抽出（個人名を除外した強化版）
+        # クエリから重要な単語を抽出
         keywords = []
-        
+
         # 先に日付を追加（もし存在すれば）
         if date_str:
             keywords.append(date_str)
-            # 日付の別形式も追加（YYYY-MM-DD, YYYY/MM/DD）
-            if date_match:
-                year = date_match.group(1)
-                month = date_match.group(2).zfill(2)
-                day = date_match.group(3).zfill(2)
-                keywords.append(f"{year}{month}{day}")  # YYYYMMDD
-                keywords.append(f"{year}-{month}-{day}")  # YYYY-MM-DD
-                keywords.append(f"{year}/{month}/{day}")  # YYYY/MM/DD
-                logger.info(f"日付形式のバリエーションを追加: {year}{month}{day}, {year}-{month}-{day}, {year}/{month}/{day}")
-
-        # 「日報」キーワードは重要なので確実に追加
-        if "日報" in query.lower() and "日報" not in keywords:
-            keywords.append("日報")
-            logger.info("'日報'キーワードを追加")
 
         # その他のキーワードを追加
         for word in query.split():
             clean_word = word.strip(',.;:!?()[]{}"\'')
             if clean_word and len(clean_word) > 1 and clean_word.lower() not in stop_words:
-                # 既に追加済みでなければ追加
-                if clean_word not in keywords and date_str not in clean_word:
-                    # YYYYMMDD形式の日付はスキップ（既に別形式で追加済み）
-                    if not (re.search(r'^\d{8}$', clean_word) and int(clean_word[:4]) >= 2000):
-                        keywords.append(clean_word)
-                        logger.info(f"追加キーワード: {clean_word}")
+                # 日付文字列の一部でなければ追加
+                if date_str and date_str not in clean_word:
+                    keywords.append(clean_word)
+                elif not date_str:
+                    keywords.append(clean_word)
+                else:
+                    pass
+
+        # キーワードが少なすぎる場合のバックアップとして日報関連の単語を追加
+        if len(keywords) < 2:
+            if "日報" not in query.lower() and not any(k for k in keywords if "日報" in k):
+                keywords.append("日報")
 
         if not keywords:
             return "検索キーワードが見つかりませんでした。具体的な日付や単語で検索してください。"
@@ -630,41 +395,13 @@ class OneDriveSearch:
         # 関連コンテンツの取得
         relevant_content = f"--- {len(search_results)}件の関連ファイルが見つかりました ---\n\n"
         total_chars = len(relevant_content)
-        
-        # PDF・Office文書の数をカウント
-        pdf_files = []
-        office_files = []
-        other_files = []
-        
-        for result in search_results:
-            ext = result.get('extension', '').lower()
-            if ext == '.pdf':
-                pdf_files.append(result)
-            elif ext in ['.docx', '.xlsx', '.pptx']:
-                office_files.append(result)
-            else:
-                other_files.append(result)
-        
-        # PDFファイルがある場合の特別メッセージ
-        if pdf_files and date_str:
-            pdf_names = [os.path.basename(f.get('path', '不明')) for f in pdf_files[:3]]
-            pdf_list = "、".join(pdf_names)
-            
-            if len(pdf_files) > 3:
-                pdf_list += f"など{len(pdf_files)}件"
-                
-            pdf_msg = f"※ {date_str}の日報として{len(pdf_files)}件のPDFファイル（{pdf_list}）が見つかりました。"
-            pdf_msg += "PDFの内容はテキスト抽出できませんが、ファイルは存在しています。\n\n"
-            relevant_content += pdf_msg
-            total_chars += len(pdf_msg)
 
         for i, result in enumerate(search_results):
             file_path = result.get('path')
             file_name = result.get('name')
             modified = result.get('modified', '不明')
-            extension = result.get('extension', '').lower()
 
-            # ファイルの内容を読み込み
+            # ファイルの内容を読み込み（ファイル抽出器を使用）
             content = self.read_file_content(file_path)
 
             # コンテンツのプレビューを追加（文字数制限あり）
@@ -673,13 +410,6 @@ class OneDriveSearch:
 
             file_content = f"=== ファイル {i+1}: {file_name} ===\n"
             file_content += f"更新日時: {modified}\n"
-            
-            # PDF/Officeファイルの場合は特別なメッセージを追加
-            if extension == '.pdf':
-                file_content += f"※このファイルはPDFです。内容はテキスト抽出できませんが、ファイルは存在しています。\n"
-            elif extension in ['.docx', '.xlsx', '.pptx']:
-                file_content += f"※このファイルは{extension[1:].upper()}形式です。内容はテキスト抽出できませんが、ファイルは存在しています。\n"
-                
             file_content += f"{preview}\n\n"
 
             # 最大文字数をチェック
