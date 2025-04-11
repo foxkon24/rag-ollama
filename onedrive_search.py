@@ -71,7 +71,7 @@ class OneDriveSearch:
             use_cache: キャッシュを使用するかどうか
 
         Returns:
-            検索結果のリスト [{'path': ファイルパス, 'name': ファイル名, 'modified': 更新日時}]
+            検索結果のリスト [{'path': ファイルパス, 'name': ファイル名, 'modified': 更新日時, 'extension': 拡張子}]
         """
         # デフォルト値の設定
         if file_types is None:
@@ -103,64 +103,20 @@ class OneDriveSearch:
         search_terms = []
 
         for k in keywords:
-            # 複数の日付形式を検出
-            date_match = None
-            
-            # 1. YYYY年MM月DD日 形式
-            jp_date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', k)
-            if jp_date_match:
-                date_match = jp_date_match
-                year = date_match.group(1)
-                month = date_match.group(2).zfill(2)  # 1桁の月を2桁に
-                day = date_match.group(3).zfill(2)    # 1桁の日を2桁に
-                date_keywords.extend([
-                    f"{year}{month}{day}",         # YYYYMMDD
-                    f"{year}-{month}-{day}",       # YYYY-MM-DD
-                    f"{year}/{month}/{day}",       # YYYY/MM/DD
-                    f"{year}年{month}月{day}日"    # YYYY年MM月DD日
-                ])
-                logger.info(f"日本語日付形式を検出: {year}年{month}月{day}日")
-            
-            # 2. YYYY/MM/DD または YYYY-MM-DD 形式
-            if not date_match:
-                slash_date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', k)
-                if slash_date_match:
-                    date_match = slash_date_match
+            # 日付形式（YYYY年MM月DD日）を抽出
+            if re.search(r'\d{4}年\d{1,2}月\d{1,2}日', k):
+                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', k)
+                if date_match:
                     year = date_match.group(1)
-                    month = date_match.group(2).zfill(2)
-                    day = date_match.group(3).zfill(2)
-                    date_keywords.extend([
-                        f"{year}{month}{day}",         # YYYYMMDD
-                        f"{year}-{month}-{day}",       # YYYY-MM-DD
-                        f"{year}/{month}/{day}",       # YYYY/MM/DD
-                        f"{year}年{month}月{day}日"    # YYYY年MM月DD日
-                    ])
-                    logger.info(f"スラッシュ/ハイフン日付形式を検出: {year}/{month}/{day}")
-            
-            # 3. YYYYMMDD 形式（8桁の数字）
-            if not date_match and re.match(r'^\d{8}$', k):
-                year = k[:4]
-                month = k[4:6]
-                day = k[6:8]
-                
-                # 日付の妥当性を簡易チェック（月と日の範囲）
-                if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
-                    date_match = True
-                    date_keywords.extend([
-                        f"{year}{month}{day}",         # YYYYMMDD
-                        f"{year}-{month}-{day}",       # YYYY-MM-DD
-                        f"{year}/{month}/{day}",       # YYYY/MM/DD
-                        f"{year}年{month}月{day}日"    # YYYY年MM月DD日
-                    ])
-                    logger.info(f"数字連続日付形式を検出: {year}{month}{day}")
-            
-            # 日付検出されなかった場合は通常のキーワードとして追加
-            if not date_match:
+                    month = date_match.group(2).zfill(2)  # 1桁の月を2桁に
+                    day = date_match.group(3).zfill(2)    # 1桁の日を2桁に
+                    date_pattern = f"{year}{month}{day}"
+                    date_pattern2 = f"{year}-{month}-{day}"
+                    date_pattern3 = f"{year}/{month}/{day}"
+                    date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
+            else:
                 # 日本語検索キーワードは短くして検索精度を上げる
                 if len(k) > 2 and re.search(r'[ぁ-んァ-ン一-龥]', k):
-                    search_terms.append(k)
-                # 英数字は追加
-                elif len(k) > 2:
                     search_terms.append(k)
 
         # 少なくとも日付キーワードは追加
@@ -237,7 +193,7 @@ class OneDriveSearch:
             else:
                 full_condition = search_condition
 
-            # PowerShellコマンドの構築（改善版）
+            # PowerShellコマンドの構築（改善版）- ファイル拡張子も取得
             ps_command = f"""
             $OutputEncoding = [System.Text.Encoding]::UTF8
             [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -252,6 +208,7 @@ class OneDriveSearch:
                         name = $file.Name
                         modified = $file.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
                         size = $file.Length
+                        extension = $file.Extension.ToLower()
                     }}
                 }}
                 ConvertTo-Json -InputObject $results -Depth 2
@@ -324,7 +281,7 @@ class OneDriveSearch:
             # 結果のフォーマットと表示
             logger.info(f"検索結果: {len(results)}件")
             for i, result in enumerate(results[:3]):  # 最初の3件のみログ表示
-                logger.info(f"結果{i+1}: {result.get('name')} - {result.get('path')}")
+                logger.info(f"結果{i+1}: {result.get('name')} - {result.get('path')} - {result.get('extension', '不明')}")
 
             # キャッシュに保存
             self.search_cache[cache_key] = {
@@ -456,7 +413,8 @@ class OneDriveSearch:
                 "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
                 "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
                 "----------------------------------------"
-                "このPDFからテキスト抽出はサポートされていません"
+                "このPDFファイルが存在します。ただし、内容のテキスト抽出はサポートされていません。"
+                "PDFが見つかりました: {file_path}"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -479,7 +437,8 @@ class OneDriveSearch:
                 "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
                 "----------------------------------------"
                 # Wordアプリケーションを使わず、基本情報のみ表示
-                "このWord文書からのテキスト抽出はサポートされていません"
+                "このWord文書ファイルが存在します。ただし、内容のテキスト抽出はサポートされていません。"
+                "Word文書が見つかりました: {file_path}"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -501,7 +460,8 @@ class OneDriveSearch:
                 "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
                 "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
                 "----------------------------------------"
-                "このExcelからのデータ抽出はサポートされていません"
+                "このExcelファイルが存在します。ただし、内容のデータ抽出はサポートされていません。"
+                "Excelファイルが見つかりました: {file_path}"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -523,7 +483,8 @@ class OneDriveSearch:
                 "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
                 "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
                 "----------------------------------------"
-                "このPowerPointからのテキスト抽出はサポートされていません"
+                "このPowerPointファイルが存在します。ただし、内容のテキスト抽出はサポートされていません。"
+                "PowerPointファイルが見つかりました: {file_path}"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -549,47 +510,17 @@ class OneDriveSearch:
         if max_files is None:
             max_files = self.max_results
 
-        # 複数の日付形式を抽出
-        date_match = None
+        # 日付を抽出（YYYY年MM月DD日）
+        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
         date_str = None
-        
-        # 1. YYYY年MM月DD日 形式
-        jp_date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
-        if jp_date_match:
-            date_match = jp_date_match
+
+        if date_match:
             year = date_match.group(1)
             month = date_match.group(2).zfill(2)
             day = date_match.group(3).zfill(2)
             date_str = f"{year}年{month}月{day}日"
             date_pattern = f"{year}{month}{day}"
-            logger.info(f"日本語日付指定を検出: {date_str} (パターン: {date_pattern})")
-        
-        # 2. YYYY/MM/DD または YYYY-MM-DD 形式
-        if not date_match:
-            slash_date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', query)
-            if slash_date_match:
-                date_match = slash_date_match
-                year = date_match.group(1)
-                month = date_match.group(2).zfill(2)
-                day = date_match.group(3).zfill(2)
-                date_str = f"{year}年{month}月{day}日"  # 標準形式に変換
-                date_pattern = f"{year}{month}{day}"
-                logger.info(f"スラッシュ/ハイフン日付指定を検出: {year}/{month}/{day} -> {date_str}")
-        
-        # 3. YYYYMMDD 形式（8桁の数字）
-        if not date_match:
-            digit_date_match = re.search(r'(\d{4})(\d{2})(\d{2})', query)
-            if digit_date_match:
-                year = digit_date_match.group(1)
-                month = digit_date_match.group(2)
-                day = digit_date_match.group(3)
-                
-                # 日付の妥当性を簡易チェック（月と日の範囲）
-                if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
-                    date_match = digit_date_match
-                    date_str = f"{year}年{month}月{day}日"  # 標準形式に変換
-                    date_pattern = f"{year}{month}{day}"
-                    logger.info(f"数字連続日付指定を検出: {year}{month}{day} -> {date_str}")
+            logger.info(f"日付指定を検出: {date_str} (パターン: {date_pattern})")
 
         # 検索クエリからストップワードを除去
         stop_words = ["について", "とは", "の", "を", "に", "は", "で", "が", "と", "から", "へ", "より", 
@@ -602,16 +533,6 @@ class OneDriveSearch:
         # 先に日付を追加（もし存在すれば）
         if date_str:
             keywords.append(date_str)
-            
-            # 日付の別形式も追加（検索の精度向上のため）
-            if date_match:
-                year = date_match.group(1)
-                month = date_match.group(2).zfill(2) if len(date_match.groups()) >= 2 else ""
-                day = date_match.group(3).zfill(2) if len(date_match.groups()) >= 3 else ""
-                
-                # 数値形式のみ追加（YYYYMMDD）- 検索時には他の形式も生成される
-                if year and month and day:
-                    keywords.append(f"{year}{month}{day}")
 
         # その他のキーワードを追加
         for word in query.split():
@@ -649,11 +570,39 @@ class OneDriveSearch:
         # 関連コンテンツの取得
         relevant_content = f"--- {len(search_results)}件の関連ファイルが見つかりました ---\n\n"
         total_chars = len(relevant_content)
+        
+        # PDF・Office文書の数をカウント
+        pdf_files = []
+        office_files = []
+        other_files = []
+        
+        for result in search_results:
+            ext = result.get('extension', '').lower()
+            if ext == '.pdf':
+                pdf_files.append(result)
+            elif ext in ['.docx', '.xlsx', '.pptx']:
+                office_files.append(result)
+            else:
+                other_files.append(result)
+        
+        # PDFファイルがある場合の特別メッセージ
+        if pdf_files and date_str:
+            pdf_names = [os.path.basename(f.get('path', '不明')) for f in pdf_files[:3]]
+            pdf_list = "、".join(pdf_names)
+            
+            if len(pdf_files) > 3:
+                pdf_list += f"など{len(pdf_files)}件"
+                
+            pdf_msg = f"※ {date_str}の日報として{len(pdf_files)}件のPDFファイル（{pdf_list}）が見つかりました。"
+            pdf_msg += "PDFの内容はテキスト抽出できませんが、ファイルは存在しています。\n\n"
+            relevant_content += pdf_msg
+            total_chars += len(pdf_msg)
 
         for i, result in enumerate(search_results):
             file_path = result.get('path')
             file_name = result.get('name')
             modified = result.get('modified', '不明')
+            extension = result.get('extension', '').lower()
 
             # ファイルの内容を読み込み
             content = self.read_file_content(file_path)
@@ -664,6 +613,13 @@ class OneDriveSearch:
 
             file_content = f"=== ファイル {i+1}: {file_name} ===\n"
             file_content += f"更新日時: {modified}\n"
+            
+            # PDF/Officeファイルの場合は特別なメッセージを追加
+            if extension == '.pdf':
+                file_content += f"※このファイルはPDFです。内容はテキスト抽出できませんが、ファイルは存在しています。\n"
+            elif extension in ['.docx', '.xlsx', '.pptx']:
+                file_content += f"※このファイルは{extension[1:].upper()}形式です。内容はテキスト抽出できませんが、ファイルは存在しています。\n"
+                
             file_content += f"{preview}\n\n"
 
             # 最大文字数をチェック
