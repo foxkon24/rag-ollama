@@ -1,4 +1,4 @@
-# onedrive_search.py - OneDriveファイル検索機能（pypdf対応版）
+# onedrive_search.py - OneDriveファイル検索機能（日本語対応改善版）
 import os
 import logging
 import subprocess
@@ -6,8 +6,6 @@ import re
 import time
 import json
 from datetime import datetime
-import tempfile
-import base64
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -62,21 +60,6 @@ class OneDriveSearch:
         self.search_cache = {}
         self.cache_expiry = 300  # キャッシュの有効期限（秒）
 
-        # pypdfがインストールされているか確認
-        self.pypdf_available = self._check_pypdf_available()
-        if self.pypdf_available:
-            logger.info("pypdfが利用可能です - PDFテキスト抽出を有効化します")
-        else:
-            logger.warning("pypdfが利用できません - PDFテキスト抽出は無効です")
-
-    def _check_pypdf_available(self):
-        """pypdfがインストールされているか確認"""
-        try:
-            import pypdf
-            return True
-        except ImportError:
-            return False
-
     def search_files(self, keywords, file_types=None, max_results=None, use_cache=True):
         """
         OneDrive内のファイルをキーワードで検索
@@ -120,20 +103,64 @@ class OneDriveSearch:
         search_terms = []
 
         for k in keywords:
-            # 日付形式（YYYY年MM月DD日）を抽出
-            if re.search(r'\d{4}年\d{1,2}月\d{1,2}日', k):
-                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', k)
-                if date_match:
+            # 複数の日付形式を検出
+            date_match = None
+            
+            # 1. YYYY年MM月DD日 形式
+            jp_date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', k)
+            if jp_date_match:
+                date_match = jp_date_match
+                year = date_match.group(1)
+                month = date_match.group(2).zfill(2)  # 1桁の月を2桁に
+                day = date_match.group(3).zfill(2)    # 1桁の日を2桁に
+                date_keywords.extend([
+                    f"{year}{month}{day}",         # YYYYMMDD
+                    f"{year}-{month}-{day}",       # YYYY-MM-DD
+                    f"{year}/{month}/{day}",       # YYYY/MM/DD
+                    f"{year}年{month}月{day}日"    # YYYY年MM月DD日
+                ])
+                logger.info(f"日本語日付形式を検出: {year}年{month}月{day}日")
+            
+            # 2. YYYY/MM/DD または YYYY-MM-DD 形式
+            if not date_match:
+                slash_date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', k)
+                if slash_date_match:
+                    date_match = slash_date_match
                     year = date_match.group(1)
-                    month = date_match.group(2).zfill(2)  # 1桁の月を2桁に
-                    day = date_match.group(3).zfill(2)    # 1桁の日を2桁に
-                    date_pattern = f"{year}{month}{day}"
-                    date_pattern2 = f"{year}-{month}-{day}"
-                    date_pattern3 = f"{year}/{month}/{day}"
-                    date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
-            else:
+                    month = date_match.group(2).zfill(2)
+                    day = date_match.group(3).zfill(2)
+                    date_keywords.extend([
+                        f"{year}{month}{day}",         # YYYYMMDD
+                        f"{year}-{month}-{day}",       # YYYY-MM-DD
+                        f"{year}/{month}/{day}",       # YYYY/MM/DD
+                        f"{year}年{month}月{day}日"    # YYYY年MM月DD日
+                    ])
+                    logger.info(f"スラッシュ/ハイフン日付形式を検出: {year}/{month}/{day}")
+            
+            # 3. YYYYMMDD 形式（8桁の数字）
+            if not date_match and re.match(r'^\d{8}$', k):
+                year = k[:4]
+                month = k[4:6]
+                day = k[6:8]
+                
+                # 日付の妥当性を簡易チェック（月と日の範囲）
+                if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+                    date_match = True
+                    date_keywords.extend([
+                        f"{year}{month}{day}",         # YYYYMMDD
+                        f"{year}-{month}-{day}",       # YYYY-MM-DD
+                        f"{year}/{month}/{day}",       # YYYY/MM/DD
+                        f"{year}年{month}月{day}日"    # YYYY年MM月DD日
+                    ])
+                    logger.info(f"数字連続日付形式を検出: {year}{month}{day}")
+            
+            # 日付検出されなかった場合は通常のキーワードとして追加
+            if not date_match:
                 # 日本語検索キーワードは短くして検索精度を上げる
                 if len(k) > 2 and re.search(r'[ぁ-んァ-ン一-龥]', k):
+                    search_terms.append(k)
+                # 英数字は追加
+                elif len(k) > 2:
                     search_terms.append(k)
 
         # 少なくとも日付キーワードは追加
@@ -349,9 +376,9 @@ class OneDriveSearch:
                     logger.warning(f"代替エンコーディングで読み込みました: {file_path}")
                     return content
             else:
-                # バイナリファイルの場合はファイル形式に応じた処理
+                # バイナリファイルの場合はPowerShellを使用して内容を抽出
                 if ext in ['.pdf']:
-                    return self._extract_pdf_content_improved(file_path)
+                    return self._extract_pdf_content(file_path)
                 elif ext in ['.docx']:
                     return self._extract_word_content(file_path)
                 elif ext in ['.xlsx']:
@@ -372,141 +399,6 @@ class OneDriveSearch:
         except Exception as e:
             logger.error(f"ファイル読み込み中にエラーが発生しました: {str(e)}")
             return f"ファイル読み込みエラー: {str(e)}"
-
-    def _extract_pdf_content_improved(self, file_path):
-        """
-        PDFファイルからテキストを抽出する（pypdfを使用）
-        """
-        logger.info(f"PDFファイルからテキスト抽出を試みます: {file_path}")
-        
-        # 方法1: pypdfが利用可能ならそれを使う
-        if self.pypdf_available:
-            try:
-                import pypdf
-                
-                with open(file_path, 'rb') as file:
-                    pdf_reader = pypdf.PdfReader(file)
-                    text_content = []
-                    
-                    # ファイル情報
-                    text_content.append(f"PDF名: {os.path.basename(file_path)}")
-                    text_content.append(f"ページ数: {len(pdf_reader.pages)}ページ")
-                    text_content.append(f"最終更新日時: {time.ctime(os.path.getmtime(file_path))}")
-                    text_content.append("-" * 40)
-                    
-                    # 本文抽出（最大10ページまで）
-                    max_pages = min(10, len(pdf_reader.pages))
-                    for page_num in range(max_pages):
-                        page = pdf_reader.pages[page_num]
-                        try:
-                            page_text = page.extract_text()
-                            if page_text:
-                                text_content.append(f"[ページ {page_num + 1}]")
-                                text_content.append(page_text)
-                        except Exception as e:
-                            logger.error(f"ページ {page_num + 1} のテキスト抽出に失敗: {str(e)}")
-                    
-                    if len(pdf_reader.pages) > max_pages:
-                        text_content.append(f"... (残り {len(pdf_reader.pages) - max_pages} ページ省略)")
-                    
-                    return "\n".join(text_content)
-            except Exception as e:
-                logger.error(f"pypdfによるPDF抽出に失敗: {str(e)}")
-                # PowerShellによる抽出にフォールバック
-        
-        # 方法2: PowerShellを使用したPDF抽出（iTextSharpを使用）
-        try:
-            # 一時ファイルを作成してiTextSharpのスクリプトを格納
-            with tempfile.NamedTemporaryFile(suffix='.ps1', delete=False, mode='w') as ps_file:
-                ps_script = f"""
-                # 必要なコードの追加
-                Add-Type -Path "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System.IO.Compression.FileSystem\\v4.0_4.0.0.0__b77a5c561934e089\\System.IO.Compression.FileSystem.dll"
-                
-                try {{
-                    # PDFファイルの情報を取得
-                    $pdfFile = "{file_path.replace('\\', '\\\\')}"
-                    $fileInfo = Get-Item $pdfFile
-                    
-                    Write-Output "PDF名: $($fileInfo.Name)"
-                    Write-Output "ファイルサイズ: $($fileInfo.Length) bytes"
-                    Write-Output "最終更新日時: $($fileInfo.LastWriteTime)"
-                    Write-Output "----------------------------------------"
-                    
-                    # iTextSharpがインストールされているか確認
-                    $itextPath = "C:\\Program Files\\iTextSharp\\itextsharp.dll"
-                    if (Test-Path $itextPath) {{
-                        Add-Type -Path $itextPath
-                        
-                        # PDFテキスト抽出
-                        $reader = New-Object iTextSharp.text.pdf.PdfReader($pdfFile)
-                        $sb = New-Object System.Text.StringBuilder
-                        
-                        for ($page = 1; $page -le $reader.NumberOfPages; $page++) {{
-                            $sb.AppendLine("[ページ $page]")
-                            $text = [iTextSharp.text.pdf.parser.PdfTextExtractor]::GetTextFromPage($reader, $page)
-                            $sb.AppendLine($text)
-                            if ($page -ge 10) {{
-                                $sb.AppendLine("... (残りのページは省略)")
-                                break
-                            }}
-                        }}
-                        
-                        $reader.Close()
-                        Write-Output $sb.ToString()
-                    }} else {{
-                        Write-Output "iTextSharpが見つからないため、PDFからのテキスト抽出ができません。"
-                        Write-Output "ファイル内容: PDFファイルの内容は確認できませんが、ファイルは存在します。"
-                    }}
-                }} catch {{
-                    Write-Output "エラーが発生しました: $_"
-                }}
-                """
-                ps_file.write(ps_script)
-                ps_file_path = ps_file.name
-            
-            # PowerShellスクリプトの実行
-            process = subprocess.Popen(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_file_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False
-            )
-            
-            stdout, stderr = process.communicate()
-            
-            # 削除
-            try:
-                os.unlink(ps_file_path)
-            except:
-                pass
-            
-            # 出力処理
-            try:
-                content_text = stdout.decode('utf-8', errors='replace')
-                return content_text if content_text.strip() else f"PDF名: {os.path.basename(file_path)}\n内容: このPDFからはテキストを抽出できませんでした。"
-            except:
-                return f"PDF名: {os.path.basename(file_path)}\n内容: PDFの処理中にエラーが発生しました。"
-        
-        except Exception as e:
-            logger.error(f"PowerShellによるPDF抽出に失敗: {str(e)}")
-        
-        # 方法3: 最終手段 - ファイル情報のみ表示
-        try:
-            # PDF情報を表示
-            file_info = f"""PDF名: {os.path.basename(file_path)}
-ファイルサイズ: {os.path.getsize(file_path)} bytes
-最終更新日時: {time.ctime(os.path.getmtime(file_path))}
-----------------------------------------
-注意: このPDFからのテキスト抽出は失敗しましたが、ファイルは存在します。
-
-※テキスト抽出には特定のライブラリが必要です。以下のコマンドをサーバーで実行してください：
-pip install pypdf
-"""
-            return file_info
-        
-        except Exception as e:
-            logger.error(f"最終手段のPDF抽出にも失敗: {str(e)}")
-            return f"PDF名: {os.path.basename(file_path)}\n内容: PDFファイルが見つかりましたが、テキスト抽出はサポートされていません。"
 
     def _extract_file_content_helper(self, file_path, ps_command):
         """
@@ -551,9 +443,32 @@ pip install pypdf
             logger.error(f"ファイル処理中にエラーが発生しました: {str(e)}")
             return f"ファイル処理エラー: {str(e)}"
 
+    def _extract_pdf_content(self, file_path):
+        """
+        PDFファイルからテキストを抽出する（簡易版）
+        """
+        cmd = f"""
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        try {{
+            # ファイルの存在確認
+            if (Test-Path -Path "{file_path}" -PathType Leaf) {{
+                "PDF名: {os.path.basename(file_path)}"
+                "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
+                "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
+                "----------------------------------------"
+                "このPDFからテキスト抽出はサポートされていません"
+            }} else {{
+                "ファイルが見つかりません: {file_path}"
+            }}
+        }} catch {{
+            "エラーが発生しました: $_"
+        }}
+        """
+        return self._extract_file_content_helper(file_path, cmd)
+
     def _extract_word_content(self, file_path):
         """
-        Wordファイル(docx)からテキストを抽出する - 改善版
+        Wordファイル(docx)からテキストを抽出する
         """
         cmd = f"""
         try {{
@@ -563,32 +478,8 @@ pip install pypdf
                 "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
                 "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
                 "----------------------------------------"
-                
-                # Word.ApplicationがインストールされているかをWindows機能で確認
-                if (Get-WmiObject -Class Win32_Product | Where-Object {{ $_.Name -like "*Microsoft Office*" -or $_.Name -like "*Microsoft 365*" }}) {{
-                    try {{
-                        # Wordアプリケーションを起動
-                        $word = New-Object -ComObject Word.Application
-                        $word.Visible = $false
-                        $doc = $word.Documents.Open("{file_path}")
-                        $content = $doc.Content.Text
-                        $doc.Close()
-                        $word.Quit()
-                        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($word) | Out-Null
-                        
-                        # 内容の先頭を表示
-                        if ($content) {{
-                            "文書内容:"
-                            $content
-                        }} else {{
-                            "文書内容を取得できませんでした"
-                        }}
-                    }} catch {{
-                        "Word文書からのテキスト抽出中にエラー: $_"
-                    }}
-                }} else {{
-                    "Microsoft Wordがインストールされていないため、内容は抽出できません"
-                }}
+                # Wordアプリケーションを使わず、基本情報のみ表示
+                "このWord文書からのテキスト抽出はサポートされていません"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -600,7 +491,7 @@ pip install pypdf
 
     def _extract_excel_content(self, file_path):
         """
-        Excelファイル(xlsx)から基本情報と内容を抽出する - 改善版
+        Excelファイル(xlsx)から基本情報を抽出する
         """
         cmd = f"""
         try {{
@@ -610,53 +501,7 @@ pip install pypdf
                 "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
                 "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
                 "----------------------------------------"
-                
-                # Excel.ApplicationがインストールされているかをWindows機能で確認
-                if (Get-WmiObject -Class Win32_Product | Where-Object {{ $_.Name -like "*Microsoft Office*" -or $_.Name -like "*Microsoft 365*" }}) {{
-                    try {{
-                        # Excelアプリケーションを起動
-                        $excel = New-Object -ComObject Excel.Application
-                        $excel.Visible = $false
-                        $workbook = $excel.Workbooks.Open("{file_path}")
-                        
-                        "シート一覧:"
-                        foreach($sheet in $workbook.Sheets) {{
-                            "- " + $sheet.Name
-                        }}
-                        
-                        "先頭シートの内容抜粋:"
-                        $sheet = $workbook.Sheets.Item(1)
-                        $usedRange = $sheet.UsedRange
-                        $rows = $usedRange.Rows.Count
-                        $cols = $usedRange.Columns.Count
-                        
-                        # 最大20行、10列まで表示
-                        $maxRows = [Math]::Min(20, $rows)
-                        $maxCols = [Math]::Min(10, $cols)
-                        
-                        for ($r = 1; $r -le $maxRows; $r++) {{
-                            $rowData = ""
-                            for ($c = 1; $c -le $maxCols; $c++) {{
-                                $cell = $sheet.Cells.Item($r, $c)
-                                $value = $cell.Text
-                                $rowData += "$value`t"
-                            }}
-                            $rowData
-                        }}
-                        
-                        if ($rows > $maxRows -or $cols > $maxCols) {{
-                            "... (データが多いため一部省略)"
-                        }}
-                        
-                        $workbook.Close($false)
-                        $excel.Quit()
-                        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
-                    }} catch {{
-                        "Excelファイルからのデータ抽出中にエラー: $_"
-                    }}
-                }} else {{
-                    "Microsoft Excelがインストールされていないため、内容は抽出できません"
-                }}
+                "このExcelからのデータ抽出はサポートされていません"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -668,7 +513,7 @@ pip install pypdf
 
     def _extract_powerpoint_content(self, file_path):
         """
-        PowerPointファイル(pptx)から基本情報と内容を抽出する - 改善版
+        PowerPointファイル(pptx)から基本情報を抽出する
         """
         cmd = f"""
         try {{
@@ -678,50 +523,7 @@ pip install pypdf
                 "ファイルサイズ: " + (Get-Item "{file_path}").Length + " bytes"
                 "最終更新日時: " + (Get-Item "{file_path}").LastWriteTime
                 "----------------------------------------"
-                
-                # PowerPoint.ApplicationがインストールされているかをWindows機能で確認
-                if (Get-WmiObject -Class Win32_Product | Where-Object {{ $_.Name -like "*Microsoft Office*" -or $_.Name -like "*Microsoft 365*" }}) {{
-                    try {{
-                        # PowerPointアプリケーションを起動
-                        $ppt = New-Object -ComObject PowerPoint.Application
-                        $presentation = $ppt.Presentations.Open("{file_path}")
-                        
-                        "スライド数: " + $presentation.Slides.Count
-                        
-                        # 最大10スライドまで内容を表示
-                        $maxSlides = [Math]::Min(10, $presentation.Slides.Count)
-                        
-                        for ($i = 1; $i -le $maxSlides; $i++) {{
-                            $slide = $presentation.Slides.Item($i)
-                            "-- スライド $i --"
-                            
-                            # タイトルを表示
-                            try {{
-                                foreach($shape in $slide.Shapes) {{
-                                    if ($shape.HasTextFrame) {{
-                                        if ($shape.TextFrame.HasText) {{
-                                            $shape.TextFrame.TextRange.Text
-                                        }}
-                                    }}
-                                }}
-                            }} catch {{
-                                "テキスト抽出エラー: $_"
-                            }}
-                        }}
-                        
-                        if ($presentation.Slides.Count > $maxSlides) {{
-                            "... (残り " + ($presentation.Slides.Count - $maxSlides) + " スライドは省略)"
-                        }}
-                        
-                        $presentation.Close()
-                        $ppt.Quit()
-                        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($ppt) | Out-Null
-                    }} catch {{
-                        "PowerPointからのテキスト抽出中にエラー: $_"
-                    }}
-                }} else {{
-                    "Microsoft PowerPointがインストールされていないため、内容は抽出できません"
-                }}
+                "このPowerPointからのテキスト抽出はサポートされていません"
             }} else {{
                 "ファイルが見つかりません: {file_path}"
             }}
@@ -747,17 +549,47 @@ pip install pypdf
         if max_files is None:
             max_files = self.max_results
 
-        # 日付を抽出（YYYY年MM月DD日）
-        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+        # 複数の日付形式を抽出
+        date_match = None
         date_str = None
-
-        if date_match:
+        
+        # 1. YYYY年MM月DD日 形式
+        jp_date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+        if jp_date_match:
+            date_match = jp_date_match
             year = date_match.group(1)
             month = date_match.group(2).zfill(2)
             day = date_match.group(3).zfill(2)
             date_str = f"{year}年{month}月{day}日"
             date_pattern = f"{year}{month}{day}"
-            logger.info(f"日付指定を検出: {date_str} (パターン: {date_pattern})")
+            logger.info(f"日本語日付指定を検出: {date_str} (パターン: {date_pattern})")
+        
+        # 2. YYYY/MM/DD または YYYY-MM-DD 形式
+        if not date_match:
+            slash_date_match = re.search(r'(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})', query)
+            if slash_date_match:
+                date_match = slash_date_match
+                year = date_match.group(1)
+                month = date_match.group(2).zfill(2)
+                day = date_match.group(3).zfill(2)
+                date_str = f"{year}年{month}月{day}日"  # 標準形式に変換
+                date_pattern = f"{year}{month}{day}"
+                logger.info(f"スラッシュ/ハイフン日付指定を検出: {year}/{month}/{day} -> {date_str}")
+        
+        # 3. YYYYMMDD 形式（8桁の数字）
+        if not date_match:
+            digit_date_match = re.search(r'(\d{4})(\d{2})(\d{2})', query)
+            if digit_date_match:
+                year = digit_date_match.group(1)
+                month = digit_date_match.group(2)
+                day = digit_date_match.group(3)
+                
+                # 日付の妥当性を簡易チェック（月と日の範囲）
+                if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+                    date_match = digit_date_match
+                    date_str = f"{year}年{month}月{day}日"  # 標準形式に変換
+                    date_pattern = f"{year}{month}{day}"
+                    logger.info(f"数字連続日付指定を検出: {year}{month}{day} -> {date_str}")
 
         # 検索クエリからストップワードを除去
         stop_words = ["について", "とは", "の", "を", "に", "は", "で", "が", "と", "から", "へ", "より", 
@@ -770,6 +602,16 @@ pip install pypdf
         # 先に日付を追加（もし存在すれば）
         if date_str:
             keywords.append(date_str)
+            
+            # 日付の別形式も追加（検索の精度向上のため）
+            if date_match:
+                year = date_match.group(1)
+                month = date_match.group(2).zfill(2) if len(date_match.groups()) >= 2 else ""
+                day = date_match.group(3).zfill(2) if len(date_match.groups()) >= 3 else ""
+                
+                # 数値形式のみ追加（YYYYMMDD）- 検索時には他の形式も生成される
+                if year and month and day:
+                    keywords.append(f"{year}{month}{day}")
 
         # その他のキーワードを追加
         for word in query.split():
@@ -814,7 +656,6 @@ pip install pypdf
             modified = result.get('modified', '不明')
 
             # ファイルの内容を読み込み
-            logger.info(f"ファイル{i+1}の内容を読み込みます: {file_path}")
             content = self.read_file_content(file_path)
 
             # コンテンツのプレビューを追加（文字数制限あり）
@@ -840,28 +681,6 @@ pip install pypdf
             total_chars += len(file_content)
 
         return relevant_content
-
-    def install_pypdf(self):
-        """pypdfをインストール試行（必要に応じて）"""
-        try:
-            import pypdf
-            logger.info("pypdfは既にインストールされています")
-            self.pypdf_available = True
-            return True
-        except ImportError:
-            logger.warning("pypdfがインストールされていません。インストールを試みます...")
-            try:
-                result = subprocess.call(["pip", "install", "pypdf"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if result == 0:
-                    logger.info("pypdfのインストールに成功しました")
-                    self.pypdf_available = True
-                    return True
-                else:
-                    logger.error("pypdfのインストールに失敗しました")
-                    return False
-            except Exception as e:
-                logger.error(f"pypdfのインストール中にエラー: {str(e)}")
-                return False
 
 # 使用例
 if __name__ == "__main__":
