@@ -4,6 +4,7 @@ import requests
 import traceback
 import re
 import os
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,8 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
             search_path = onedrive_search.base_directory
             short_path = get_shortened_path(search_path)
             
-            # 日付を含むかどうかを確認（日報検索に重要）
-            has_date = bool(re.search(r'\d{4}年\d{1,2}月\d{1,2}日', clean_query))
+            # 複数の形式から日付を検出
+            has_date, date_info = has_date_in_query(clean_query)
             
             # OneDriveから関連情報を取得
             logger.info(f"OneDriveから関連情報を検索: {clean_query} (日付指定: {has_date})")
@@ -51,15 +52,11 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
                     logger.info(f"ファイル内容抽出状況: {content_check}")
                 else:
                     # ファイルが見つからない場合は見つからないことを明示
-                    if has_date:
-                        # 日付から数字だけを抽出して表示
-                        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
-                        if date_match:
-                            year = date_match.group(1)
-                            month = date_match.group(2)
-                            day = date_match.group(3)
-                            date_str = f"{year}年{month}月{day}日"
-                            onedrive_context = f"\n\n注意: {date_str}の日報は検索ディレクトリ（{short_path}）から見つかりませんでした。"
+                    if has_date and date_info:
+                        # 日付情報を整形して表示
+                        year, month, day = date_info
+                        date_str = f"{year}年{month}月{day}日"
+                        onedrive_context = f"\n\n注意: {date_str}の日報は検索ディレクトリ（{short_path}）から見つかりませんでした。"
                     else:
                         onedrive_context = f"\n\n注意: 関連する日報ファイルは検索ディレクトリ（{short_path}）から見つかりませんでした。"
                     
@@ -98,11 +95,9 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 参考資料に示された情報のみを使用し、ない情報は「資料には記載がありません」と正直に答えてください。"""
             elif "日報" in clean_query and not ("件の関連ファイルが見つかりました" in onedrive_context):
                 # 日報が見つからない場合
-                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
-                if date_match:
-                    year = date_match.group(1)
-                    month = date_match.group(2)
-                    day = date_match.group(3)
+                has_date, date_info = has_date_in_query(clean_query)
+                if has_date and date_info:
+                    year, month, day = date_info
                     short_path = get_shortened_path(search_path)
                     prompt = f"""以下の質問に日本語で丁寧に回答してください。
 
@@ -122,8 +117,8 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
 
 質問: {clean_query}
 
-ご質問の日報データは検索ディレクトリ（{short_path}）から見つかりませんでした。具体的な日付（例：2024年10月26日）を指定すると検索できる可能性があります。
-日報検索には、年月日を含めた形で質問していただくとより正確に検索できます。"""
+ご質問の日報データは検索ディレクトリ（{short_path}）から見つかりませんでした。具体的な日付（例：2024年10月26日、2024/10/26、20241026など）を指定すると検索できる可能性があります。
+日報検索には、日付を含めた形で質問していただくとより正確に検索できます。"""
             else:
                 # OneDriveコンテキストを含むプロンプト
                 if onedrive_context:
@@ -193,6 +188,61 @@ def generate_ollama_response(query, ollama_url, ollama_model, ollama_timeout, on
         # スタックトレースをログに記録
         logger.error(traceback.format_exc())
         return f"エラーが発生しました: {str(e)}"
+
+def has_date_in_query(query):
+    """
+    クエリに日付が含まれているかを確認する（複数の形式に対応）
+    
+    Args:
+        query: 検索クエリ
+        
+    Returns:
+        tuple: (日付があるかどうか, (年, 月, 日) のタプルまたはNone)
+    """
+    # 日本語の日付形式（YYYY年MM月DD日）
+    japanese_date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+    if japanese_date_match:
+        return True, (
+            japanese_date_match.group(1),
+            japanese_date_match.group(2).zfill(2),
+            japanese_date_match.group(3).zfill(2)
+        )
+    
+    # スラッシュまたはハイフン区切りの日付形式（YYYY/MM/DD or YYYY-MM-DD）
+    slash_date_match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', query)
+    if slash_date_match:
+        return True, (
+            slash_date_match.group(1),
+            slash_date_match.group(2).zfill(2),
+            slash_date_match.group(3).zfill(2)
+        )
+    
+    # 数値形式の日付（YYYYMMDD）
+    numeric_date_match = re.search(r'\b(\d{4})(\d{2})(\d{2})\b', query)
+    if numeric_date_match:
+        return True, (
+            numeric_date_match.group(1), 
+            numeric_date_match.group(2), 
+            numeric_date_match.group(3)
+        )
+    
+    # 独立した8桁の数字がYYYYMMDDとして有効かどうか確認
+    for word in query.split():
+        if word.isdigit() and len(word) == 8:
+            year = word[:4]
+            month = word[4:6]
+            day = word[6:8]
+            
+            # 日付として有効かどうか確認（簡易チェック）
+            try:
+                month_int = int(month)
+                day_int = int(day)
+                if 1 <= month_int <= 12 and 1 <= day_int <= 31:
+                    return True, (year, month, day)
+            except ValueError:
+                continue
+    
+    return False, None
 
 def get_shortened_path(path):
     """
@@ -265,13 +315,11 @@ Ollamaを使うと、プライバシーを保ちながら、AI機能を様々な
     
     # 日報に関する質問のフォールバック
     elif "日報" in query:
-        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
-        if date_match:
-            year = date_match.group(1)
-            month = date_match.group(2)
-            day = date_match.group(3)
+        has_date, date_info = has_date_in_query(query)
+        if has_date and date_info:
+            year, month, day = date_info
             return f"{year}年{month}月{day}日の日報データを取得できませんでした。サーバーの応答に問題があるか、該当する日報が検索ディレクトリ（{short_path}）に存在しない可能性があります。時間をおいて再度お試しいただくか、システム管理者にお問い合わせください。"
         else:
-            return f"日報データを取得できませんでした。具体的な日付（例：2024年10月26日）を指定して再度お試しください。検索ディレクトリ: {short_path}"
+            return f"日報データを取得できませんでした。具体的な日付（例：2024年10月26日、2024/10/26、20241026）を指定して再度お試しください。検索ディレクトリ: {short_path}"
     else:
         return f"「{query}」についてのご質問ありがとうございます。ただいまOllamaサーバーの処理に時間がかかっています。少し時間をおいてから再度お試しいただくか、より具体的な質問を入力してください。"

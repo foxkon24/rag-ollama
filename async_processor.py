@@ -2,6 +2,7 @@
 import logging
 import traceback
 import time
+import re
 from ollama_client import generate_ollama_response
 
 logger = logging.getLogger(__name__)
@@ -27,15 +28,12 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
         # ログにリクエスト情報を記録
         logger.info(f"非同期処理を開始: query='{clean_query}', model={ollama_model}")
         
-        # 日付形式かどうかを確認
-        import re
-        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', clean_query)
+        # 複数のフォーマットに対応する日付パターン認識
+        date_info = extract_date_from_query(clean_query)
         
-        if date_match:
-            year = date_match.group(1)
-            month = date_match.group(2).zfill(2)
-            day = date_match.group(3).zfill(2)
-            logger.info(f"日付指定のある検索を実行します: '{year}年{month}月{day}日'")
+        if date_info:
+            year, month, day, format_type = date_info
+            logger.info(f"日付指定のある検索を実行します: '{year}年{month}月{day}日' (元の形式: {format_type})")
         
         # OneDrive検索を実行するかどうかを判断
         use_onedrive = onedrive_search is not None and 'onedrive' not in clean_query.lower()
@@ -136,3 +134,62 @@ def process_query_async(query_text, original_data, ollama_url, ollama_model, oll
                 teams_webhook.send_ollama_response(clean_query, error_message, None, search_path)
             except:
                 pass  # エラー通知に失敗した場合は、これ以上何もしない
+
+def extract_date_from_query(query):
+    """
+    クエリから日付情報を抽出する（複数のフォーマットに対応）
+    
+    Args:
+        query: 検索クエリ文字列
+    
+    Returns:
+        tuple: (年, 月, 日, フォーマット) または None（日付が見つからない場合）
+    """
+    # 1. YYYY年MM月DD日 形式を確認
+    japanese_date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+    if japanese_date_match:
+        return (
+            japanese_date_match.group(1),
+            japanese_date_match.group(2).zfill(2),
+            japanese_date_match.group(3).zfill(2),
+            "和暦形式"
+        )
+    
+    # 2. YYYY/MM/DD または YYYY-MM-DD 形式を確認
+    slash_date_match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', query)
+    if slash_date_match:
+        return (
+            slash_date_match.group(1),
+            slash_date_match.group(2).zfill(2),
+            slash_date_match.group(3).zfill(2),
+            "スラッシュ区切り形式"
+        )
+    
+    # 3. YYYYMMDD 形式（8桁の数字）を確認
+    numeric_date_match = re.search(r'\b(\d{4})(\d{2})(\d{2})\b', query)
+    if numeric_date_match:
+        return (
+            numeric_date_match.group(1),
+            numeric_date_match.group(2),
+            numeric_date_match.group(3),
+            "数値形式"
+        )
+    
+    # 4. 独立した8桁の数字がYYYYMMDDとして有効かどうか確認
+    for word in query.split():
+        if word.isdigit() and len(word) == 8:
+            year = word[:4]
+            month = word[4:6]
+            day = word[6:8]
+            
+            # 日付として有効かどうか確認（簡易チェック）
+            try:
+                month_int = int(month)
+                day_int = int(day)
+                if 1 <= month_int <= 12 and 1 <= day_int <= 31:
+                    return (year, month, day, "数値形式")
+            except ValueError:
+                continue
+    
+    # 日付が見つからない
+    return None

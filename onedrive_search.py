@@ -108,20 +108,67 @@ class OneDriveSearch:
         search_terms = []
 
         for k in keywords:
-            # 日付形式（YYYY年MM月DD日）を抽出
-            if re.search(r'\d{4}年\d{1,2}月\d{1,2}日', k):
-                date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', k)
-                if date_match:
-                    year = date_match.group(1)
-                    month = date_match.group(2).zfill(2)  # 1桁の月を2桁に
-                    day = date_match.group(3).zfill(2)    # 1桁の日を2桁に
-                    date_pattern = f"{year}{month}{day}"
+            # 複数のフォーマットに対応する日付パターン検出
+            # 1. YYYY年MM月DD日 形式
+            japanese_date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', k)
+            
+            # 2. YYYY/MM/DD または YYYY-MM-DD 形式
+            slash_date_match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', k)
+            
+            # 3. YYYYMMDD 形式 (8桁の数字)
+            numeric_date_match = re.search(r'^(\d{4})(\d{2})(\d{2})$', k)
+            
+            # パターンに応じてフォーマット
+            if japanese_date_match:
+                year = japanese_date_match.group(1)
+                month = japanese_date_match.group(2).zfill(2)  # 1桁の月を2桁に
+                day = japanese_date_match.group(3).zfill(2)    # 1桁の日を2桁に
+                logger.info(f"和暦形式の日付を検出: {year}年{month}月{day}日")
+                date_pattern = f"{year}{month}{day}"
+                date_pattern2 = f"{year}-{month}-{day}"
+                date_pattern3 = f"{year}/{month}/{day}"
+                date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
+            elif slash_date_match:
+                year = slash_date_match.group(1)
+                month = slash_date_match.group(2).zfill(2)
+                day = slash_date_match.group(3).zfill(2)
+                logger.info(f"スラッシュ区切り日付を検出: {year}/{month}/{day}")
+                date_pattern = f"{year}{month}{day}"
+                date_pattern2 = f"{year}-{month}-{day}"
+                date_pattern3 = f"{year}/{month}/{day}"
+                date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
+            elif numeric_date_match:
+                year = numeric_date_match.group(1)
+                month = numeric_date_match.group(2)
+                day = numeric_date_match.group(3)
+                logger.info(f"数値形式の日付を検出: {year}{month}{day}")
+                date_pattern = f"{year}{month}{day}"
+                date_pattern2 = f"{year}-{month}-{day}"
+                date_pattern3 = f"{year}/{month}/{day}"
+                date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
+            # 4. YYYYMMDD パターンを探す (キーワードが8桁の数字のみで構成されている場合)
+            elif k.isdigit() and len(k) == 8:
+                year = k[:4]
+                month = k[4:6]
+                day = k[6:8]
+                # 有効な日付かどうかを確認
+                try:
+                    # 日付としての妥当性をチェック
+                    datetime(int(year), int(month), int(day))
+                    logger.info(f"数値形式の日付を検出: {year}{month}{day}")
+                    date_pattern = k
                     date_pattern2 = f"{year}-{month}-{day}"
                     date_pattern3 = f"{year}/{month}/{day}"
                     date_keywords.extend([date_pattern, date_pattern2, date_pattern3])
+                except ValueError:
+                    # 数字だけど日付として無効な場合は通常のキーワードとして扱う
+                    if len(k) > 2 and re.search(r'[ぁ-んァ-ン一-龥]', k):
+                        search_terms.append(k)
             else:
                 # 日本語検索キーワードは短くして検索精度を上げる
                 if len(k) > 2 and re.search(r'[ぁ-んァ-ン一-龥]', k):
+                    search_terms.append(k)
+                else:
                     search_terms.append(k)
 
         # 少なくとも日付キーワードは追加
@@ -335,17 +382,41 @@ class OneDriveSearch:
         if max_files is None:
             max_files = self.max_results
 
-        # 日付を抽出（YYYY年MM月DD日）
-        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+        # 複数のフォーマットに対応する日付抽出
         date_str = None
-
-        if date_match:
-            year = date_match.group(1)
-            month = date_match.group(2).zfill(2)
-            day = date_match.group(3).zfill(2)
+        date_pattern = None
+        
+        # 1. YYYY年MM月DD日 形式を確認
+        japanese_date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', query)
+        
+        # 2. YYYY/MM/DD または YYYY-MM-DD 形式を確認
+        slash_date_match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', query)
+        
+        # 3. YYYYMMDD 形式（8桁の数字）を確認
+        numeric_date_match = re.search(r'\b(\d{4})(\d{2})(\d{2})\b', query)
+        
+        # 見つかった日付パターンを処理
+        if japanese_date_match:
+            year = japanese_date_match.group(1)
+            month = japanese_date_match.group(2).zfill(2)
+            day = japanese_date_match.group(3).zfill(2)
             date_str = f"{year}年{month}月{day}日"
             date_pattern = f"{year}{month}{day}"
-            logger.info(f"日付指定を検出: {date_str} (パターン: {date_pattern})")
+            logger.info(f"和暦形式の日付を検出: {date_str} (パターン: {date_pattern})")
+        elif slash_date_match:
+            year = slash_date_match.group(1)
+            month = slash_date_match.group(2).zfill(2)
+            day = slash_date_match.group(3).zfill(2)
+            date_str = f"{year}年{month}月{day}日"
+            date_pattern = f"{year}{month}{day}"
+            logger.info(f"スラッシュ区切り日付を検出: {date_str} (パターン: {date_pattern})")
+        elif numeric_date_match:
+            year = numeric_date_match.group(1)
+            month = numeric_date_match.group(2)
+            day = numeric_date_match.group(3)
+            date_str = f"{year}年{month}月{day}日"
+            date_pattern = f"{year}{month}{day}"
+            logger.info(f"数値形式の日付を検出: {date_str} (パターン: {date_pattern})")
 
         # 検索クエリからストップワードを除去
         stop_words = ["について", "とは", "の", "を", "に", "は", "で", "が", "と", "から", "へ", "より", 
