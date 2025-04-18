@@ -89,7 +89,7 @@ def register_routes(app, config, teams_webhook, onedrive_search=None):
                 return jsonify({
                     "type": "message",
                     "text": "リクエストを受け付けました。回答を生成中です..." + 
-                           (" OneDriveからの関連情報も検索します。" if onedrive_search else "")
+                           ("  しばらくお待ちください..." if onedrive_search else "")
                 })
 
             else:
